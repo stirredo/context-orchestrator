@@ -1,10 +1,10 @@
 {
   "mcpServers": {
     "context-orchestrator": {
-      "command": "/Users/iceking/tasks/vector_databases_experiments/.venv/bin/python",
+      "command": ".venv/bin/python",
       "args": ["-m", "context_orchestrator.server"],
       "env": {
-        "PYTHONPATH": "/Users/iceking/tasks/vector_databases_experiments/src"
+        "PYTHONPATH": "src"
       }
     }
   }
