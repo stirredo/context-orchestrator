@@ -5,6 +5,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from context_orchestrator.db import Database
+from context_orchestrator.search import VectorSearch
 
 # CRITICAL: Never print to stdout — it corrupts the JSON-RPC protocol.
 logging.basicConfig(stream=sys.stderr, level=logging.INFO)
@@ -34,11 +35,63 @@ IMPORTANT BEHAVIORS:
    - "repo" for GitHub/GitLab repository URLs
    - "url" for other URLs (Slack, Confluence, etc.)
    - "text" for inline text pasted in conversation
+
+5. AUTO-SEARCH: When you're unsure about something or need context you don't have, call search()
+   BEFORE saying you don't know. search() finds relevant information across ALL tasks and repos
+   using semantic search. You don't need to know which task or repo — just describe what you need.
 """,
 )
 
 db_path = os.environ.get("CO_DB_PATH")
 db = Database(db_path=Path(db_path) if db_path else None)
+
+chroma_path = os.environ.get("CO_CHROMA_PATH")
+vs = VectorSearch(chroma_path=Path(chroma_path) if chroma_path else None)
+
+
+def _sync_index():
+    """Ensure all existing data is indexed. Runs on startup."""
+    indexed = 0
+
+    # Index repo knowledge
+    for row in db.conn.execute("SELECT * FROM repo_knowledge").fetchall():
+        row = dict(row)
+        doc_id = f"repo_knowledge:{row['id']}"
+        vs.add(doc_id, row["insight"], {
+            "type": "repo_knowledge",
+            "repo_url": row["repo_url"],
+        })
+        indexed += 1
+
+    # Index text sources and source notes
+    for row in db.conn.execute(
+        "SELECT s.*, t.name as task_name, t.project FROM sources s JOIN tasks t ON s.task_id = t.id"
+    ).fetchall():
+        row = dict(row)
+        if row["source_type"] == "text":
+            doc_id = f"source:{row['id']}"
+            vs.add(doc_id, row["reference"], {
+                "type": "source",
+                "source_type": row["source_type"],
+                "task_name": row["task_name"],
+                "project": row["project"],
+            })
+            indexed += 1
+        if row["notes"]:
+            doc_id = f"source_notes:{row['id']}"
+            vs.add(doc_id, row["notes"], {
+                "type": "source_notes",
+                "source_type": row["source_type"],
+                "reference": row["reference"],
+                "task_name": row["task_name"],
+                "project": row["project"],
+            })
+            indexed += 1
+
+    logger.info(f"Synced {indexed} documents to vector index")
+
+
+_sync_index()
 
 
 @mcp.tool()
@@ -108,6 +161,24 @@ def add_source(
 
     try:
         source = db.add_source(task["id"], source_type, reference, notes)
+
+        # Index text sources and notes in vector search
+        if source_type == "text":
+            vs.add(f"source:{source['id']}", reference, {
+                "type": "source",
+                "source_type": source_type,
+                "task_name": task_name,
+                "project": task.get("project", ""),
+            })
+        if notes:
+            vs.add(f"source_notes:{source['id']}", notes, {
+                "type": "source_notes",
+                "source_type": source_type,
+                "reference": reference,
+                "task_name": task_name,
+                "project": task.get("project", ""),
+            })
+
         return (
             f"Added {source_type} source to task '{task_name}': {reference}"
             + (f" ({notes})" if notes else "")
@@ -179,6 +250,8 @@ def remove_source(task_name: str, source_id: int, project: str = "") -> str:
         return f"Error: Source {source_id} does not belong to task '{task_name}'."
 
     if db.remove_source(source_id):
+        vs.remove(f"source:{source_id}")
+        vs.remove(f"source_notes:{source_id}")
         return f"Removed source {source_id} from task '{task_name}'."
     return f"Error: Source {source_id} not found."
 
@@ -195,6 +268,10 @@ def update_repo_knowledge(repo_url: str, insight: str) -> str:
         insight: A single piece of knowledge (e.g., "Needs Node 18", "Run tests with pytest -x")
     """
     entry = db.update_repo_knowledge(repo_url, insight)
+    vs.add(f"repo_knowledge:{entry['id']}", insight, {
+        "type": "repo_knowledge",
+        "repo_url": repo_url,
+    })
     return f"Saved repo knowledge for {repo_url}: {insight}"
 
 
@@ -212,6 +289,46 @@ def get_repo_knowledge(repo_url: str) -> str:
     lines = [f"Repo knowledge ({repo_url}):"]
     for k in knowledge:
         lines.append(f"  - {k['insight']} (added {k['created_at']})")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def search(query: str, project: str = "") -> str:
+    """Semantic search across ALL stored knowledge — task sources, repo knowledge, notes.
+
+    Use this when you need to find relevant information without knowing which task or repo it belongs to.
+    This searches across everything and returns the most relevant results.
+
+    Args:
+        query: Natural language search query (e.g., "how to run tests", "auth flow discussion")
+        project: Optional git remote URL to limit search to a specific project's tasks
+    """
+    where = None
+    if project:
+        where = {"project": project}
+
+    hits = vs.search(query, n_results=10, where=where)
+    if not hits:
+        # Try without project filter as fallback (repo knowledge is not project-scoped)
+        if project:
+            hits = vs.search(query, n_results=10)
+        if not hits:
+            return f"No results for '{query}'."
+
+    lines = [f"Search results for '{query}':"]
+    for h in hits:
+        meta = h["metadata"]
+        doc_type = meta.get("type", "unknown")
+
+        if doc_type == "repo_knowledge":
+            lines.append(f"  [repo: {meta.get('repo_url', '?')}] {h['text']}")
+        elif doc_type == "source":
+            lines.append(f"  [task: {meta.get('task_name', '?')}] ({meta.get('source_type', '?')}) {h['text'][:200]}")
+        elif doc_type == "source_notes":
+            lines.append(f"  [task: {meta.get('task_name', '?')}] note on {meta.get('reference', '?')}: {h['text']}")
+        else:
+            lines.append(f"  [{doc_type}] {h['text'][:200]}")
+
     return "\n".join(lines)
 
 
