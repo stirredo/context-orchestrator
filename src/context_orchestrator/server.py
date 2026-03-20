@@ -6,6 +6,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 from context_orchestrator.db import Database
 from context_orchestrator.search import VectorSearch
+from context_orchestrator.ingest import index_file_content
 
 # CRITICAL: Never print to stdout — it corrupts the JSON-RPC protocol.
 logging.basicConfig(stream=sys.stderr, level=logging.INFO)
@@ -63,7 +64,7 @@ def _sync_index():
         })
         indexed += 1
 
-    # Index text sources and source notes
+    # Index sources: text content, file content (chunked), and notes
     for row in db.conn.execute(
         "SELECT s.*, t.name as task_name, t.project FROM sources s JOIN tasks t ON s.task_id = t.id"
     ).fetchall():
@@ -77,6 +78,13 @@ def _sync_index():
                 "project": row["project"],
             })
             indexed += 1
+        elif row["source_type"] == "file":
+            num_chunks = index_file_content(
+                vs, row["id"], row["reference"],
+                task_name=row["task_name"],
+                project=row["project"],
+            )
+            indexed += num_chunks
         if row["notes"]:
             doc_id = f"source_notes:{row['id']}"
             vs.add(doc_id, row["notes"], {
@@ -162,7 +170,7 @@ def add_source(
     try:
         source = db.add_source(task["id"], source_type, reference, notes)
 
-        # Index text sources and notes in vector search
+        # Index in vector search
         if source_type == "text":
             vs.add(f"source:{source['id']}", reference, {
                 "type": "source",
@@ -170,6 +178,12 @@ def add_source(
                 "task_name": task_name,
                 "project": task.get("project", ""),
             })
+        elif source_type == "file":
+            index_file_content(
+                vs, source["id"], reference,
+                task_name=task_name,
+                project=task.get("project", ""),
+            )
         if notes:
             vs.add(f"source_notes:{source['id']}", notes, {
                 "type": "source_notes",
@@ -252,6 +266,9 @@ def remove_source(task_name: str, source_id: int, project: str = "") -> str:
     if db.remove_source(source_id):
         vs.remove(f"source:{source_id}")
         vs.remove(f"source_notes:{source_id}")
+        # Clean up file chunks (try up to 100 chunks)
+        for i in range(100):
+            vs.remove(f"file_chunk:{source_id}:{i}")
         return f"Removed source {source_id} from task '{task_name}'."
     return f"Error: Source {source_id} not found."
 
@@ -322,6 +339,13 @@ def search(query: str, project: str = "") -> str:
 
         if doc_type == "repo_knowledge":
             lines.append(f"  [repo: {meta.get('repo_url', '?')}] {h['text']}")
+        elif doc_type == "file_chunk":
+            chunk_info = f"chunk {meta.get('chunk_index', '?')}/{meta.get('total_chunks', '?')}"
+            lines.append(
+                f"  [task: {meta.get('task_name', '?')}] {meta.get('filename', '?')} ({chunk_info}):\n"
+                f"    {h['text'][:200]}..."
+                f"\n    → Full file: {meta.get('file_path', '?')}"
+            )
         elif doc_type == "source":
             lines.append(f"  [task: {meta.get('task_name', '?')}] ({meta.get('source_type', '?')}) {h['text'][:200]}")
         elif doc_type == "source_notes":
