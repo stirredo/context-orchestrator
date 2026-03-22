@@ -10,7 +10,6 @@ dependencies = [
 
 [project.scripts]
 save-transcript = "context_orchestrator.cli:main"
-transcript-watcher = "context_orchestrator.watcher:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
