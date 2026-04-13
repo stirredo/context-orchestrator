@@ -1,8 +1,10 @@
 import sys
 import os
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 from context_orchestrator.db import Database
 from context_orchestrator.search import VectorSearch
@@ -12,37 +14,6 @@ from context_orchestrator.ingest import index_file_content
 logging.basicConfig(stream=sys.stderr, level=logging.INFO)
 logger = logging.getLogger("context-orchestrator")
 
-mcp = FastMCP(
-    "context-orchestrator",
-    instructions="""You have access to the Context Orchestrator — a persistent task and context management system.
-
-IMPORTANT BEHAVIORS:
-1. AUTO-DETECT PROJECT: Before creating or listing tasks, detect the current project by running
-   `git remote get-url origin` in the working directory. Pass the result as the `project` parameter.
-   This scopes tasks to the correct project.
-
-2. AUTO-LOAD CONTEXT: When the user mentions working on a task (e.g., "I'm working on auth-refactor"),
-   call get_task() to load the full context manifest. Then read any file sources and clone any repo
-   sources as needed.
-
-3. AUTO-LEARN: When you discover something about a repository — setup steps, test commands, build
-   requirements, conventions, gotchas, PR structure — proactively call update_repo_knowledge() to
-   save it. Do NOT ask the user. Just save it. This knowledge will automatically appear in future
-   sessions for any task that references this repo.
-
-4. SOURCE CAPTURE: When the user pastes links, file paths, or text and associates them with a task,
-   call add_source() to persist them. Use the appropriate source_type:
-   - "file" for local file paths
-   - "repo" for GitHub/GitLab repository URLs
-   - "url" for other URLs (Slack, Confluence, etc.)
-   - "text" for inline text pasted in conversation
-
-5. AUTO-SEARCH: When you're unsure about something or need context you don't have, call search()
-   BEFORE saying you don't know. search() finds relevant information across ALL tasks and repos
-   using semantic search. You don't need to know which task or repo — just describe what you need.
-""",
-)
-
 db_path = os.environ.get("CO_DB_PATH")
 db = Database(db_path=Path(db_path) if db_path else None)
 
@@ -51,7 +22,7 @@ vs = VectorSearch(chroma_path=Path(chroma_path) if chroma_path else None)
 
 
 def _sync_index():
-    """Ensure all existing data is indexed. Runs on startup."""
+    """Ensure all existing data is indexed. Runs in background on startup."""
     indexed = 0
 
     # Index repo knowledge
@@ -99,7 +70,46 @@ def _sync_index():
     logger.info(f"Synced {indexed} documents to vector index")
 
 
-_sync_index()
+@asynccontextmanager
+async def _lifespan(app: FastMCP):
+    """Run the index sync in a background thread so the server starts accepting connections immediately."""
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(anyio.to_thread.run_sync, _sync_index)
+        yield
+        tg.cancel_scope.cancel()
+
+
+mcp = FastMCP(
+    "context-orchestrator",
+    instructions="""You have access to the Context Orchestrator — a persistent task and context management system.
+
+IMPORTANT BEHAVIORS:
+1. AUTO-DETECT PROJECT: Before creating or listing tasks, detect the current project by running
+   `git remote get-url origin` in the working directory. Pass the result as the `project` parameter.
+   This scopes tasks to the correct project.
+
+2. AUTO-LOAD CONTEXT: When the user mentions working on a task (e.g., "I'm working on auth-refactor"),
+   call get_task() to load the full context manifest. Then read any file sources and clone any repo
+   sources as needed.
+
+3. AUTO-LEARN: When you discover something about a repository — setup steps, test commands, build
+   requirements, conventions, gotchas, PR structure — proactively call update_repo_knowledge() to
+   save it. Do NOT ask the user. Just save it. This knowledge will automatically appear in future
+   sessions for any task that references this repo.
+
+4. SOURCE CAPTURE: When the user pastes links, file paths, or text and associates them with a task,
+   call add_source() to persist them. Use the appropriate source_type:
+   - "file" for local file paths
+   - "repo" for GitHub/GitLab repository URLs
+   - "url" for other URLs (Slack, Confluence, etc.)
+   - "text" for inline text pasted in conversation
+
+5. AUTO-SEARCH: When you're unsure about something or need context you don't have, call search()
+   BEFORE saying you don't know. search() finds relevant information across ALL tasks and repos
+   using semantic search. You don't need to know which task or repo — just describe what you need.
+""",
+    lifespan=_lifespan,
+)
 
 
 @mcp.tool()
