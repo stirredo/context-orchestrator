@@ -330,6 +330,7 @@ def search(query: str, project: str = "") -> str:
         query: Natural language search query (e.g., "how to run tests", "auth flow discussion")
         project: Optional git remote URL to limit search to a specific project's tasks
     """
+    vs.reload()  # pick up writes from the watcher / other processes
     where = None
     if project:
         where = {"project": project}
