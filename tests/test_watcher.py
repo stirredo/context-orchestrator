@@ -1,0 +1,103 @@
+import json
+import os
+import tempfile
+import time
+from pathlib import Path
+
+import pytest
+
+from context_orchestrator import watcher
+from context_orchestrator.search import VectorSearch
+
+
+@pytest.fixture
+def vs():
+    return VectorSearch(chroma_path=Path(tempfile.mkdtemp()))
+
+
+@pytest.fixture
+def watch_dir(tmp_path):
+    d = tmp_path / "transcripts"
+    d.mkdir()
+    return d
+
+
+@pytest.fixture
+def state_file(tmp_path):
+    return tmp_path / "state.json"
+
+
+def _write_old(path: Path, text: str, age_seconds: float = 60.0) -> None:
+    path.write_text(text, encoding="utf-8")
+    past = time.time() - age_seconds
+    os.utime(path, (past, past))
+
+
+def test_scan_picks_up_new_file(vs, watch_dir, state_file):
+    f = watch_dir / "meeting-1.md"
+    _write_old(f, "Discussion of the new auth flow with the security team.")
+
+    state = watcher.load_state(state_file)
+    indexed = watcher.scan_once(vs, watch_dir, state)
+    watcher.save_state(state, state_file)
+
+    assert indexed == [f]
+    assert vs.count() == 1
+    assert str(f) in state
+
+
+def test_scan_skips_unchanged_file(vs, watch_dir, state_file):
+    f = watch_dir / "meeting-2.md"
+    _write_old(f, "First pass content here.")
+
+    state = watcher.load_state(state_file)
+    watcher.scan_once(vs, watch_dir, state)
+    count_after_first = vs.count()
+
+    indexed = watcher.scan_once(vs, watch_dir, state)
+    assert indexed == []
+    assert vs.count() == count_after_first
+
+
+def test_scan_reindexes_modified_file_and_drops_old_chunks(vs, watch_dir, state_file):
+    f = watch_dir / "meeting-3.md"
+    _write_old(f, "word " * 1200, age_seconds=60.0)
+
+    state = watcher.load_state(state_file)
+    watcher.scan_once(vs, watch_dir, state)
+    chunks_v1 = vs.count()
+    assert chunks_v1 >= 3
+
+    _write_old(f, "single short chunk now", age_seconds=60.0)
+
+    indexed = watcher.scan_once(vs, watch_dir, state)
+    assert indexed == [f]
+    chunks_v2 = vs.count()
+    assert chunks_v2 == 1, f"expected old chunks to be cleared, got {chunks_v2}"
+
+
+def test_scan_skips_recently_modified_file(vs, watch_dir, state_file):
+    f = watch_dir / "meeting-4.md"
+    f.write_text("just written, still being appended to")
+
+    state = watcher.load_state(state_file)
+    indexed = watcher.scan_once(vs, watch_dir, state, settle_seconds=10.0)
+    assert indexed == []
+    assert vs.count() == 0
+
+
+def test_state_roundtrip(state_file):
+    state = {"a.md": 1.0, "b.md": 2.5}
+    watcher.save_state(state, state_file)
+    loaded = watcher.load_state(state_file)
+    assert loaded == state
+
+
+def test_load_state_returns_empty_when_missing(tmp_path):
+    missing = tmp_path / "nope.json"
+    assert watcher.load_state(missing) == {}
+
+
+def test_load_state_returns_empty_on_corrupt_json(state_file):
+    state_file.write_text("not json at all {{")
+    assert watcher.load_state(state_file) == {}
