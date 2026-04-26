@@ -101,3 +101,28 @@ def test_load_state_returns_empty_when_missing(tmp_path):
 def test_load_state_returns_empty_on_corrupt_json(state_file):
     state_file.write_text("not json at all {{")
     assert watcher.load_state(state_file) == {}
+
+
+def test_plist_payload_round_trips():
+    import plistlib
+    payload = watcher._plist_payload("/usr/bin/python3")
+    parsed = plistlib.loads(payload)
+    assert parsed["Label"] == watcher.LAUNCHD_LABEL
+    assert parsed["ProgramArguments"][0] == "/usr/bin/python3"
+    assert parsed["ProgramArguments"][-2:] == ["context_orchestrator.watcher", "run"]
+    assert parsed["RunAtLoad"] is True
+
+
+def test_main_no_subcommand_defaults_to_run(monkeypatch):
+    called = {}
+    def fake_loop(watch_dir, interval):
+        called["watch_dir"] = watch_dir
+        called["interval"] = interval
+        raise KeyboardInterrupt
+    monkeypatch.setattr(watcher, "watch_loop", fake_loop)
+    try:
+        watcher.main([])
+    except KeyboardInterrupt:
+        pass
+    assert called["watch_dir"] == watcher.TRANSCRIPT_DIR
+    assert called["interval"] == watcher.DEFAULT_INTERVAL
