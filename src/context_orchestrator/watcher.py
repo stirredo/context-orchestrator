@@ -176,6 +176,75 @@ def cmd_status(_args) -> int:
     return 0
 
 
+def cmd_doctor(_args) -> int:
+    """Health check for the transcript-watcher side of the pipeline."""
+    failures = 0
+
+    def _ok(label, value=""):
+        suffix = f" — {value}" if value else ""
+        print(f"  ✓ {label}{suffix}")
+
+    def _fail(label, hint):
+        nonlocal failures
+        failures += 1
+        print(f"  ✗ {label}")
+        print(f"      → {hint}")
+
+    print("transcript-watcher — doctor\n")
+
+    print("Paths:")
+    if TRANSCRIPT_DIR.exists():
+        n = len(list(TRANSCRIPT_DIR.glob("*.md")))
+        _ok("watch dir", f"{TRANSCRIPT_DIR} ({n} files)")
+    else:
+        _fail("watch dir missing", f"mkdir -p {TRANSCRIPT_DIR}")
+    if STATE_DIR.exists():
+        _ok("state dir", str(STATE_DIR))
+    else:
+        _fail("state dir missing", f"mkdir -p {STATE_DIR}")
+    state = load_state()
+    print(f"  · state file tracks {len(state)} indexed file(s)")
+
+    print("\nVector index:")
+    try:
+        vs = VectorSearch()
+        _ok(f"ChromaDB connected", f"{vs.count()} documents in collection")
+    except Exception as exc:
+        _fail("ChromaDB connection failed", f"{exc}")
+
+    print("\nDaemon:")
+    if LAUNCHD_PLIST.exists():
+        _ok("launchd plist installed", str(LAUNCHD_PLIST))
+        result = subprocess.run(
+            ["launchctl", "list", LAUNCHD_LABEL], capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            _ok("launchd service loaded")
+        else:
+            _fail("launchd service not loaded", f"launchctl load -w {LAUNCHD_PLIST}")
+    else:
+        _fail("launchd plist not installed", "transcript-watcher install")
+
+    print("\nUpstream (meeting-capture):")
+    mc_log = Path.home() / ".meeting-capture" / "daemon.log"
+    if mc_log.exists():
+        size_kb = mc_log.stat().st_size / 1024
+        _ok("meeting-capture daemon log present", f"{mc_log} ({size_kb:.1f} KB)")
+    else:
+        print(f"  · meeting-capture not detected (log {mc_log} missing). That's fine — watcher works with any source of *.md files in {TRANSCRIPT_DIR}.")
+
+    print("\nManual gates (cannot be checked from code):")
+    print("  ?  Claude Code restarted since context-orchestrator install (so MCP server is live)")
+
+    print()
+    if failures == 0:
+        print("All automatic checks passed.")
+        return 0
+    else:
+        print(f"{failures} issue(s). Fix and re-run.")
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="transcript-watcher",
@@ -195,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("install", help="install launchd auto-start agent").set_defaults(func=cmd_install)
     sub.add_parser("uninstall", help="remove launchd agent").set_defaults(func=cmd_uninstall)
     sub.add_parser("status", help="show watcher status").set_defaults(func=cmd_status)
+    sub.add_parser("doctor", help="full health check").set_defaults(func=cmd_doctor)
 
     args = parser.parse_args(argv)
     if not args.cmd:
