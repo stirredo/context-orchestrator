@@ -1,7 +1,9 @@
 import sys
 import os
 import logging
+import time
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 
 import anyio
@@ -9,6 +11,38 @@ from mcp.server.fastmcp import FastMCP
 from context_orchestrator.db import Database
 from context_orchestrator.search import VectorSearch
 from context_orchestrator.ingest import index_file_content
+
+# How long after a meeting transcript was last touched do we still auto-link new sources to it?
+RECENT_MEETING_WINDOW_SECONDS = 10 * 60
+TRANSCRIPTS_DIR = Path.home() / "transcripts"
+
+
+def _resolve_default_task_name(project: str = "") -> str:
+    """If a meeting transcript was modified in the last RECENT_MEETING_WINDOW_SECONDS,
+    use its name (sans .md). Otherwise fall back to inbox-YYYY-MM-DD."""
+    if TRANSCRIPTS_DIR.exists():
+        candidates = sorted(
+            TRANSCRIPTS_DIR.glob("meeting-*.md"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if candidates:
+            most_recent = candidates[0]
+            age = time.time() - most_recent.stat().st_mtime
+            if age <= RECENT_MEETING_WINDOW_SECONDS:
+                return most_recent.stem  # e.g. "meeting-2026-04-26T18-43-05"
+    return f"inbox-{date.today().isoformat()}"
+
+
+def _detect_source_type(reference: str) -> str:
+    """Heuristic: url / file / text from the reference string alone."""
+    ref = reference.strip()
+    if ref.startswith(("http://", "https://")):
+        return "url"
+    expanded = Path(ref).expanduser()
+    if expanded.exists() and expanded.is_file():
+        return "file"
+    return "text"
 
 # CRITICAL: Never print to stdout — it corrupts the JSON-RPC protocol.
 logging.basicConfig(stream=sys.stderr, level=logging.INFO)
@@ -152,24 +186,44 @@ def list_tasks(project: str = "") -> str:
 
 @mcp.tool()
 def add_source(
-    task_name: str, source_type: str, reference: str, notes: str = "", project: str = ""
+    task_name: str = "", source_type: str = "", reference: str = "", notes: str = "", project: str = ""
 ) -> str:
     """Add a source to a task. Sources can be file paths, URLs, repo links, or inline text.
 
     Args:
-        task_name: Name of the task to add the source to
-        source_type: One of "file", "repo", "url", "text"
-        reference: The file path, URL, or inline text content
-        notes: Optional description of this source
-        project: Git remote URL to find the task in the right project
+        task_name: Name of the task to add the source to. If empty, auto-picks: the most
+                   recent meeting-capture transcript (if modified within the last 10 minutes)
+                   or `inbox-YYYY-MM-DD`. Auto-creates the task if it doesn't exist.
+        source_type: One of "file", "repo", "url", "text". If empty, auto-detected from
+                     reference (url/file/text).
+        reference: The file path, URL, or inline text content.
+        notes: Optional description of this source.
+        project: Git remote URL to scope the task. Auto-detected by Claude per CLAUDE.md.
     """
+    if not source_type:
+        source_type = _detect_source_type(reference)
+
     valid_types = ("file", "repo", "url", "text")
     if source_type not in valid_types:
         return f"Error: source_type must be one of {valid_types}, got '{source_type}'"
 
+    auto_task_note = ""
+    if not task_name:
+        task_name = _resolve_default_task_name(project)
+        auto_task_note = f" (auto-task: {task_name})"
+
     task = db.get_task_by_name(task_name, project=project if project else None)
     if not task:
-        return f"Error: No task named '{task_name}'. Use list_tasks() to see available tasks."
+        # Auto-create the task. Use a description that signals auto-creation.
+        try:
+            task = db.create_task(
+                task_name,
+                description=f"Auto-created on {date.today().isoformat()} by add_source / drop",
+                project=project,
+            )
+            auto_task_note = f" (created task: {task_name})"
+        except ValueError as e:
+            return f"Error auto-creating task '{task_name}': {e}"
 
     if source_type == "file":
         path = Path(reference).expanduser().resolve()
@@ -204,11 +258,36 @@ def add_source(
             })
 
         return (
-            f"Added {source_type} source to task '{task_name}': {reference}"
+            f"Added {source_type} source to task '{task_name}'{auto_task_note}: {reference}"
             + (f" ({notes})" if notes else "")
         )
     except ValueError as e:
         return f"Error: {e}"
+
+
+@mcp.tool()
+def drop(reference: str, notes: str = "", project: str = "") -> str:
+    """Quick-save a source without thinking about task names or types.
+
+    Use this when the user pastes a file path, URL, or chunk of text and wants it
+    captured for later recall — typically during a meeting where they don't want to
+    pause and create a task. The orchestrator picks the right task automatically:
+    if a meeting transcript is currently being written (modified within the last 10
+    minutes), the source attaches to that meeting; otherwise it goes into
+    `inbox-YYYY-MM-DD` for triage later.
+
+    Args:
+        reference: A file path, URL, or inline text. Type is auto-detected.
+        notes: Optional human description ("design doc Sarah presented", "Q3 plan").
+        project: Optional git remote URL to scope to a project. Auto-detected per CLAUDE.md.
+    """
+    return add_source(
+        task_name="",
+        source_type="",
+        reference=reference,
+        notes=notes,
+        project=project,
+    )
 
 
 @mcp.tool()

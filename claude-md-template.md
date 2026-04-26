@@ -8,6 +8,7 @@ The context-orchestrator MCP server is available. It provides persistent task an
 - When I mention working on a task, call `get_task()` to load the full context manifest before doing anything else.
 - When creating or listing tasks, auto-detect the project by running `git remote get-url origin` and pass the result as the `project` parameter.
 - When I paste links, file paths, or text related to a task, call `add_source()` to persist them.
+- When I paste a link / file / chunk of text **without** mentioning a task — especially during a meeting — call `drop()`. It auto-attaches to the active meeting transcript (if recent) or the daily inbox.
 - When you discover something about a repo (setup steps, test commands, build requirements, conventions, gotchas, PR structure), proactively call `update_repo_knowledge()` to save it. Do not ask — just save it.
 
 ### Working directory
