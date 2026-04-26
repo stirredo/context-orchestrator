@@ -9,6 +9,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import plistlib
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -17,9 +20,14 @@ from .cli import index_transcript
 from .search import VectorSearch
 
 TRANSCRIPT_DIR = Path.home() / "transcripts"
-STATE_FILE = Path.home() / ".context-orchestrator" / "watcher_state.json"
+STATE_DIR = Path.home() / ".context-orchestrator"
+STATE_FILE = STATE_DIR / "watcher_state.json"
+LOG_FILE = STATE_DIR / "watcher.log"
 DEFAULT_INTERVAL = 5.0
 SETTLE_SECONDS = 2.0
+
+LAUNCHD_LABEL = "com.stirredo.transcript-watcher"
+LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 
 log = logging.getLogger("context-orchestrator.watcher")
 
@@ -97,34 +105,107 @@ def watch_loop(
         time.sleep(interval)
 
 
+def _plist_payload(python_exe: str) -> bytes:
+    payload = {
+        "Label": LAUNCHD_LABEL,
+        "ProgramArguments": [python_exe, "-m", "context_orchestrator.watcher", "run"],
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False, "Crashed": True},
+        "StandardOutPath": str(LOG_FILE),
+        "StandardErrorPath": str(LOG_FILE),
+        "WorkingDirectory": str(Path.home()),
+        "EnvironmentVariables": {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"),
+        },
+        "ProcessType": "Background",
+    }
+    return plistlib.dumps(payload)
+
+
+def cmd_run(args) -> int:
+    watch_loop(Path(args.dir).expanduser(), args.interval)
+    return 0
+
+
+def cmd_once(args) -> int:
+    vs = VectorSearch()
+    state = load_state()
+    indexed = scan_once(vs, Path(args.dir).expanduser(), state)
+    if indexed:
+        save_state(state)
+    log.info("indexed %d file(s)", len(indexed))
+    return 0
+
+
+def cmd_install(_args) -> int:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    LAUNCHD_PLIST.parent.mkdir(parents=True, exist_ok=True)
+    LAUNCHD_PLIST.write_bytes(_plist_payload(sys.executable))
+    subprocess.run(["launchctl", "unload", str(LAUNCHD_PLIST)], check=False, stderr=subprocess.DEVNULL)
+    subprocess.run(["launchctl", "load", "-w", str(LAUNCHD_PLIST)], check=False)
+    print(f"installed launchd agent at {LAUNCHD_PLIST}")
+    print("watcher will auto-start at login.")
+    return 0
+
+
+def cmd_uninstall(_args) -> int:
+    if not LAUNCHD_PLIST.exists():
+        print("launchd agent not installed")
+        return 0
+    subprocess.run(["launchctl", "unload", "-w", str(LAUNCHD_PLIST)], check=False)
+    LAUNCHD_PLIST.unlink()
+    print(f"removed {LAUNCHD_PLIST}")
+    return 0
+
+
+def cmd_status(_args) -> int:
+    print(f"transcript-watcher")
+    print(f"  watching:   {TRANSCRIPT_DIR}")
+    print(f"  state file: {STATE_FILE}")
+    print(f"  log file:   {LOG_FILE}")
+    print(f"  launchd:    {'installed' if LAUNCHD_PLIST.exists() else 'not installed'}")
+    if LAUNCHD_PLIST.exists():
+        result = subprocess.run(
+            ["launchctl", "list", LAUNCHD_LABEL],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            print(f"  loaded:     yes")
+        else:
+            print(f"  loaded:     no")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="transcript-watcher",
         description="Watch ~/transcripts/ and auto-index new or modified files.",
     )
-    parser.add_argument("--dir", default=str(TRANSCRIPT_DIR), help="Directory to watch")
-    parser.add_argument("--interval", type=float, default=DEFAULT_INTERVAL, help="Poll interval in seconds")
-    parser.add_argument("--once", action="store_true", help="Scan once and exit (for cron)")
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_run = sub.add_parser("run", help="watch loop (default)")
+    p_run.add_argument("--dir", default=str(TRANSCRIPT_DIR))
+    p_run.add_argument("--interval", type=float, default=DEFAULT_INTERVAL)
+    p_run.set_defaults(func=cmd_run)
+
+    p_once = sub.add_parser("once", help="scan once and exit (for cron)")
+    p_once.add_argument("--dir", default=str(TRANSCRIPT_DIR))
+    p_once.set_defaults(func=cmd_once)
+
+    sub.add_parser("install", help="install launchd auto-start agent").set_defaults(func=cmd_install)
+    sub.add_parser("uninstall", help="remove launchd agent").set_defaults(func=cmd_uninstall)
+    sub.add_parser("status", help="show watcher status").set_defaults(func=cmd_status)
+
     args = parser.parse_args(argv)
+    if not args.cmd:
+        args = parser.parse_args(["run"])
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         stream=sys.stderr,
     )
-
-    watch_dir = Path(args.dir).expanduser()
-    if args.once:
-        vs = VectorSearch()
-        state = load_state()
-        indexed = scan_once(vs, watch_dir, state)
-        if indexed:
-            save_state(state)
-        log.info("indexed %d file(s)", len(indexed))
-        return 0
-
-    watch_loop(watch_dir, args.interval)
-    return 0
+    return args.func(args)
 
 
 if __name__ == "__main__":
