@@ -1,14 +1,16 @@
 # context-orchestrator
 
-MCP server that gives Claude persistent memory of your tasks, sources, and repo knowledge across sessions.
+MCP server that gives Claude persistent memory of your tasks, sources, and repo knowledge across sessions, with a vector index over everything you've captured.
 
-## What it does
+Pairs with [meeting-capture](https://github.com/stirredo/meeting-capture) — that daemon writes meeting transcripts to `~/transcripts/`, and this project's `transcript-watcher` indexes them automatically. Either project runs without the other.
 
-- **Tasks** — group related sources (transcripts, docs, repo links, pasted text) under a task name
-- **Repo knowledge** — setup steps, test commands, conventions auto-accumulate as Claude discovers them
-- **Cross-session** — mention a task and Claude already knows what files, repos, and URLs are involved
+## Requirements
 
-## Setup
+- macOS or Linux
+- Python 3.10+
+- Claude Code (the MCP server is registered via `claude mcp add`)
+
+## Install
 
 ```bash
 git clone https://github.com/stirredo/context-orchestrator.git
@@ -16,57 +18,121 @@ cd context-orchestrator
 ./setup.sh
 ```
 
-Then add to `~/.claude/settings.json`:
+`setup.sh` checks prerequisites, creates a Python venv, registers the MCP server with Claude Code (via `claude mcp add`), appends standard usage instructions to `~/.claude/CLAUDE.md`, and installs the `transcript-watcher` launchd auto-start agent.
 
-```json
-{
-  "mcpServers": {
-    "context-orchestrator": {
-      "command": "<path-to-clone>/.venv/bin/python",
-      "args": ["-m", "context_orchestrator.server"],
-      "env": {
-        "PYTHONPATH": "<path-to-clone>/src"
-      }
-    }
-  }
-}
+After install, restart Claude Code so the new MCP server is loaded.
+
+To verify:
+
+```bash
+.venv/bin/transcript-watcher doctor
 ```
 
-Restart Claude Code.
-
-## Tools
+## MCP tools
 
 | Tool | Purpose |
-|------|---------|
+|---|---|
 | `create_task` | Create a task scoped to a project (git remote URL) |
 | `list_tasks` | List tasks, optionally filtered by project |
+| `get_task` | Get all sources and repo knowledge attached to a task |
 | `add_source` | Add a file path, repo URL, link, or inline text to a task |
-| `get_task` | Get all sources + repo knowledge for a task |
+| `drop` | Quick-save a source without naming a task — auto-attaches to the active meeting or daily inbox |
 | `remove_source` | Remove a source from a task |
-| `update_repo_knowledge` | Save a learning about a repo (setup, testing, conventions) |
+| `update_repo_knowledge` | Save a learning about a repo (setup, testing, conventions, gotchas) |
 | `get_repo_knowledge` | Get all stored knowledge for a repo |
+| `search` | Semantic search across all tasks, sources, transcripts, and repo knowledge |
 
-## How it works
+## Components
+
+### MCP server
+
+Long-lived process spawned by Claude Code on session start. Exposes the tools above. Storage at `~/.context-orchestrator/`.
+
+### transcript-watcher
+
+Standalone daemon (launchd-managed) that polls `~/transcripts/` every 5 seconds and indexes new or modified Markdown files into the same ChromaDB collection used by the MCP search tool. CLI:
+
+| Command | Purpose |
+|---|---|
+| `transcript-watcher status` | Daemon state, watch dir, indexed file count |
+| `transcript-watcher doctor` | Full health check |
+| `transcript-watcher run` | Run the watch loop in the foreground |
+| `transcript-watcher once` | Single-pass scan and exit (cron-friendly) |
+| `transcript-watcher install` | Install the launchd auto-start agent |
+| `transcript-watcher uninstall` | Remove the launchd auto-start agent |
+
+### save-transcript
+
+Manual transcript capture utility. Saves the current clipboard to `~/transcripts/{date}-{name}.md` and indexes it. Useful when you don't have meeting-capture installed but want to drop a transcript into the index.
+
+## Storage
+
+- `~/.context-orchestrator/context.db` — SQLite (tasks, sources, repo knowledge metadata)
+- `~/.context-orchestrator/chroma/` — ChromaDB vector index (uses the default `all-MiniLM-L6-v2` embeddings; no API key required)
+- `~/.context-orchestrator/watcher_state.json` — transcript-watcher mtime cache
+
+All local. No cloud sync. Each machine has its own independent state, which is intentional for cross-employer separation.
+
+## Typical workflows
+
+### Loading task context
 
 ```
-You: "I'm working on auth-refactor"
+You: "I'm picking up the auth-refactor work"
 
-Claude calls get_task("auth-refactor") →
+Claude → get_task("auth-refactor") →
 
   Task: auth-refactor
   Sources:
-    [1] (file) ~/docs/auth-spec.md — Auth spec v2
-    [2] (repo) https://github.com/org/backend — Main backend
-    [3] (text) Meeting transcript from Feb 22
+    [1] (file)  ~/docs/auth-spec.md      Auth spec v2
+    [2] (repo)  github.com/org/backend   Main backend
+    [3] (text)  Meeting summary 2026-04-22
 
-  Repo knowledge (https://github.com/org/backend):
+  Repo knowledge for github.com/org/backend:
     - Setup: docker-compose up
     - Tests: pytest -x
     - Uses FastAPI + SQLAlchemy
 ```
 
-Claude then reads files and clones repos using its built-in tools. No re-explaining.
+Claude then reads the files and clones the repo using its built-in tools.
 
-## Storage
+### Quick-saving during a meeting
 
-SQLite database at `~/.context-orchestrator/context.db`. Local to each machine, no cloud sync.
+```
+You: "drop ~/Downloads/q3-design.pdf, presenter is Sarah"
+
+Claude → drop("~/Downloads/q3-design.pdf", notes="presenter is Sarah") →
+
+  Added file source to task 'meeting-2026-04-26T18-43-05'
+  (auto-task: meeting-2026-04-26T18-43-05): /Users/.../q3-design.pdf
+```
+
+The PDF is auto-linked to the in-progress meeting transcript. If no meeting is active, it goes to `inbox-YYYY-MM-DD`.
+
+### Recall
+
+```
+You: "what was that thing about Q3 architecture Sarah was talking about"
+
+Claude → search("Q3 architecture Sarah") →
+
+  [transcript chunk] meeting-2026-04-26T...md  "...Sarah explained the Q3..."
+  [file chunk]       q3-design.pdf             "...service architecture for Q3..."
+  [source_notes]                               "presenter is Sarah"
+```
+
+Claude reads the relevant files via the returned references and answers.
+
+## Tests
+
+```bash
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/pytest
+```
+
+## Architecture notes
+
+- **Project scoping** uses the git remote URL as a stable identifier. Tasks are unique within `(name, project)` so the same task name can exist in different repos without collision.
+- **Repo knowledge is append-only.** Calls to `update_repo_knowledge` accumulate insights rather than overwrite, so context grows organically as Claude discovers things.
+- **The MCP server reloads its ChromaDB connection on every `search` call** so writes from the watcher (a separate process) become visible immediately. ChromaDB's `PersistentClient` does not auto-refresh across processes.
+- **The transcript-watcher uses a 2-second settle window** to avoid reading meeting-capture's `.md` files mid-write.
