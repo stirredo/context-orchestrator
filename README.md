@@ -83,7 +83,7 @@ Manual transcript capture utility. Saves the current clipboard to `~/transcripts
 - `~/.context-orchestrator/watcher_state.json` — transcript-watcher mtime cache
 - `~/.context-orchestrator/chroma.backup-<timestamp>/` — one-time backup created by `setup.sh` before first switching an existing install to the HTTP server
 
-All local. No cloud sync. Each machine has its own independent state, which is intentional for cross-employer separation.
+All local. No cloud sync. Each machine has its own independent state.
 
 ## Typical workflows
 
