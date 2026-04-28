@@ -85,21 +85,52 @@ def scan_once(
     return indexed
 
 
+def _has_dirty_files(
+    watch_dir: Path,
+    state: dict[str, float],
+    settle_seconds: float = SETTLE_SECONDS,
+) -> bool:
+    """Stat-only probe — does any file need indexing? Avoids opening Chroma."""
+    if not watch_dir.exists():
+        return False
+    now = time.time()
+    for f in watch_dir.glob("*.md"):
+        try:
+            mtime = f.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        if mtime <= state.get(str(f), 0.0):
+            continue
+        if (now - mtime) < settle_seconds:
+            continue
+        return True
+    return False
+
+
 def watch_loop(
     watch_dir: Path = TRANSCRIPT_DIR,
     interval: float = DEFAULT_INTERVAL,
     state_file: Path = STATE_FILE,
 ) -> None:
-    vs = VectorSearch()
+    """Poll watch_dir; open Chroma only when there's something to index.
+
+    Holding the Chroma client open continuously keeps a SQLite handle on the
+    underlying database, which can block other processes (the MCP server) on
+    startup or upsert. Opening lazily — and dropping the reference between
+    scans so the connection closes via GC — lets readers in between writes.
+    """
     state = load_state(state_file)
     log.info("watching %s every %.1fs", watch_dir, interval)
     while True:
         try:
-            indexed = scan_once(vs, watch_dir, state)
-            if indexed:
-                save_state(state, state_file)
-                for p in indexed:
-                    log.info("indexed %s", p.name)
+            if _has_dirty_files(watch_dir, state):
+                vs = VectorSearch()
+                indexed = scan_once(vs, watch_dir, state)
+                del vs
+                if indexed:
+                    save_state(state, state_file)
+                    for p in indexed:
+                        log.info("indexed %s", p.name)
         except Exception:
             log.exception("scan failed")
         time.sleep(interval)

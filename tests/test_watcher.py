@@ -76,6 +76,25 @@ def test_scan_reindexes_modified_file_and_drops_old_chunks(vs, watch_dir, state_
     assert chunks_v2 == 1, f"expected old chunks to be cleared, got {chunks_v2}"
 
 
+def test_has_dirty_files_detects_new(watch_dir):
+    f = watch_dir / "meeting.md"
+    _write_old(f, "content here")
+    assert watcher._has_dirty_files(watch_dir, state={}) is True
+
+
+def test_has_dirty_files_false_when_indexed(watch_dir):
+    f = watch_dir / "meeting.md"
+    _write_old(f, "content here", age_seconds=60.0)
+    state = {str(f): time.time()}
+    assert watcher._has_dirty_files(watch_dir, state) is False
+
+
+def test_has_dirty_files_skips_unsettled(watch_dir):
+    f = watch_dir / "meeting.md"
+    f.write_text("just written")
+    assert watcher._has_dirty_files(watch_dir, state={}, settle_seconds=10.0) is False
+
+
 def test_scan_skips_recently_modified_file(vs, watch_dir, state_file):
     f = watch_dir / "meeting-4.md"
     f.write_text("just written, still being appended to")
