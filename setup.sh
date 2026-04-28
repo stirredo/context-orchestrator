@@ -120,15 +120,48 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Auto-install transcript-watcher launchd agent
+# 4. Cut over to chroma HTTP server (single source of truth, no SQLite contention)
 # ---------------------------------------------------------------------------
+CHROMA_DIR="$HOME/.context-orchestrator/chroma"
 if [ "$INSTALL_LAUNCHD" -eq 1 ]; then
+    echo ""
+    echo "Setting up chroma HTTP server..."
+
+    # Stop the watcher if it's running, so it releases any open handle while we cut over.
+    if [ -f "$HOME/Library/LaunchAgents/com.stirredo.transcript-watcher.plist" ]; then
+        launchctl unload "$HOME/Library/LaunchAgents/com.stirredo.transcript-watcher.plist" 2>/dev/null || true
+    fi
+
+    # One-time backup of any existing chroma data before flipping to the daemon.
+    if [ -d "$CHROMA_DIR" ] && [ -f "$CHROMA_DIR/chroma.sqlite3" ]; then
+        STAMP=$(date +%Y%m%d-%H%M%S)
+        BACKUP="$HOME/.context-orchestrator/chroma.backup-$STAMP"
+        if [ ! -e "$BACKUP" ]; then
+            echo "  Backing up chroma data to $BACKUP (one-time, ~$(du -sh "$CHROMA_DIR" | cut -f1))..."
+            cp -R "$CHROMA_DIR" "$BACKUP"
+        fi
+    fi
+
+    "$SCRIPT_DIR/.venv/bin/context-orchestrator-chroma" install
+
+    # Wait briefly for the daemon to come up, then verify.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if "$SCRIPT_DIR/.venv/bin/context-orchestrator-chroma" status >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
+    "$SCRIPT_DIR/.venv/bin/context-orchestrator-chroma" status
+
     echo ""
     echo "Installing transcript-watcher launchd agent..."
     "$SCRIPT_DIR/.venv/bin/transcript-watcher" install
 else
     echo ""
     echo "Skipping launchd install (--no-launchd flag)."
+    echo "  Note: search.py defaults to HttpClient — without the chroma daemon"
+    echo "  running, queries will fail. Start it manually:"
+    echo "    $SCRIPT_DIR/.venv/bin/chroma run --path $CHROMA_DIR --host 127.0.0.1 --port 8765"
 fi
 
 # ---------------------------------------------------------------------------

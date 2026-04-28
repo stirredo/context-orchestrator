@@ -205,6 +205,23 @@ def cmd_doctor(_args) -> int:
     state = load_state()
     print(f"  · state file tracks {len(state)} indexed file(s)")
 
+    print("\nChroma server:")
+    from . import chroma_daemon
+    if chroma_daemon.LAUNCHD_PLIST.exists():
+        _ok("launchd plist installed", str(chroma_daemon.LAUNCHD_PLIST))
+    else:
+        _fail("chroma launchd plist not installed", "context-orchestrator-chroma install")
+    if chroma_daemon.is_listening():
+        _ok(f"server listening", f"{chroma_daemon.DEFAULT_HOST}:{chroma_daemon.DEFAULT_PORT}")
+        ok, msg = chroma_daemon.heartbeat()
+        if ok:
+            _ok("heartbeat", msg)
+        else:
+            _fail("heartbeat failed", msg)
+    else:
+        _fail("chroma server not listening",
+              f"launchctl load -w {chroma_daemon.LAUNCHD_PLIST}")
+
     print("\nVector index:")
     try:
         vs = VectorSearch()
