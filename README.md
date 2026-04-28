@@ -18,7 +18,7 @@ cd context-orchestrator
 ./setup.sh
 ```
 
-`setup.sh` checks prerequisites, creates a Python venv, registers the MCP server with Claude Code (via `claude mcp add`), appends standard usage instructions to `~/.claude/CLAUDE.md`, and installs the `transcript-watcher` launchd auto-start agent.
+`setup.sh` checks prerequisites, creates a Python venv, registers the MCP server with Claude Code (via `claude mcp add`), appends standard usage instructions to `~/.claude/CLAUDE.md`, installs the chroma HTTP server launchd agent (with a one-time backup of any existing chroma data), and installs the `transcript-watcher` launchd auto-start agent.
 
 After install, restart Claude Code so the new MCP server is loaded.
 
@@ -46,11 +46,21 @@ To verify:
 
 ### MCP server
 
-Long-lived process spawned by Claude Code on session start. Exposes the tools above. Storage at `~/.context-orchestrator/`.
+Long-lived process spawned by Claude Code on session start. Exposes the tools above. Connects to the chroma HTTP server for the vector index and to a local SQLite database at `~/.context-orchestrator/context.db` for task and source metadata.
+
+### chroma server
+
+The vector index is served by a `chroma run` HTTP daemon (launchd-managed) listening on `127.0.0.1:8765`. The MCP server, the watcher, and one-shot CLIs all connect as HTTP clients, which avoids the SQLite-lock contention that `PersistentClient`-per-process configurations are prone to under concurrent access. Override the host or port via the `CO_CHROMA_HOST` / `CO_CHROMA_PORT` environment variables. CLI:
+
+| Command | Purpose |
+|---|---|
+| `context-orchestrator-chroma status` | Plist state, port listening check, HTTP heartbeat |
+| `context-orchestrator-chroma install` | Install and start the launchd agent |
+| `context-orchestrator-chroma uninstall` | Stop and remove the launchd agent |
 
 ### transcript-watcher
 
-Standalone daemon (launchd-managed) that polls `~/transcripts/` every 5 seconds and indexes new or modified Markdown files into the same ChromaDB collection used by the MCP search tool. CLI:
+Standalone daemon (launchd-managed) that polls `~/transcripts/` every 5 seconds and indexes new or modified Markdown files into the chroma server, into the same collection used by the MCP `search` tool. CLI:
 
 | Command | Purpose |
 |---|---|
@@ -68,8 +78,10 @@ Manual transcript capture utility. Saves the current clipboard to `~/transcripts
 ## Storage
 
 - `~/.context-orchestrator/context.db` — SQLite (tasks, sources, repo knowledge metadata)
-- `~/.context-orchestrator/chroma/` — ChromaDB vector index (uses the default `all-MiniLM-L6-v2` embeddings; no API key required)
+- `~/.context-orchestrator/chroma/` — ChromaDB vector index, served by the chroma daemon (uses the default `all-MiniLM-L6-v2` embeddings; no API key required)
+- `~/.context-orchestrator/chroma-daemon.log` — chroma server stdout / stderr
 - `~/.context-orchestrator/watcher_state.json` — transcript-watcher mtime cache
+- `~/.context-orchestrator/chroma.backup-<timestamp>/` — one-time backup created by `setup.sh` before first switching an existing install to the HTTP server
 
 All local. No cloud sync. Each machine has its own independent state, which is intentional for cross-employer separation.
 
@@ -134,5 +146,5 @@ Claude reads the relevant files via the returned references and answers.
 
 - **Project scoping** uses the git remote URL as a stable identifier. Tasks are unique within `(name, project)` so the same task name can exist in different repos without collision.
 - **Repo knowledge is append-only.** Calls to `update_repo_knowledge` accumulate insights rather than overwrite, so context grows organically as Claude discovers things.
-- **The MCP server reloads its ChromaDB connection on every `search` call** so writes from the watcher (a separate process) become visible immediately. ChromaDB's `PersistentClient` does not auto-refresh across processes.
+- **The vector index runs as a separate HTTP service** so the watcher, the MCP server, and one-shot CLIs share a single writer. The on-disk format is identical to `chromadb.PersistentClient`, so existing data carries over without migration; `setup.sh` makes a one-time backup before switching an existing install to the server.
 - **The transcript-watcher uses a 2-second settle window** to avoid reading meeting-capture's `.md` files mid-write.
