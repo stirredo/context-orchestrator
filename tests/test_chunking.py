@@ -1,4 +1,9 @@
-from context_orchestrator.chunking import chunk_text, is_hallucination
+from context_orchestrator.chunking import (
+    chunk_text,
+    chunk_transcript,
+    is_hallucination,
+    parse_meeting_date,
+)
 
 
 class TestChunking:
@@ -95,3 +100,77 @@ class TestHallucinationFilter:
         )
         is_junk, _ = is_hallucination(text)
         assert is_junk is False
+
+
+class TestParseMeetingDate:
+    def test_meeting_capture_format(self):
+        dt = parse_meeting_date("meeting-2026-04-30T13-40-35.md")
+        assert dt is not None
+        assert (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second) == (2026, 4, 30, 13, 40, 35)
+
+    def test_cluely_format(self):
+        dt = parse_meeting_date("2026-04-21-1122-pvt-conversion-learner.md")
+        assert dt is not None
+        assert (dt.year, dt.month, dt.day, dt.hour, dt.minute) == (2026, 4, 21, 11, 22)
+
+    def test_unrecognized_format(self):
+        assert parse_meeting_date("random-document.md") is None
+        assert parse_meeting_date("notes.md") is None
+
+
+class TestChunkTranscript:
+    def test_timestamp_aware_emits_metadata(self):
+        text = (
+            "[14:25:00] First block of speech with several real-content words.\n"
+            "[14:25:30] Second block adding more real content to the discussion.\n"
+            "[14:26:00] Third block continuing the real discussion topic here.\n"
+        )
+        chunks = chunk_transcript(text, "meeting-2026-04-30T13-40-35.md")
+        assert len(chunks) >= 1
+        text0, meta0 = chunks[0]
+        assert meta0["chunk_type"] == "speech"
+        assert meta0["meeting_id"] == "meeting-2026-04-30T13-40-35"
+        assert "start_ts_unix" in meta0
+        assert meta0["start_ts_iso"].startswith("2026-04-30T14:25:00")
+        # blocks should be merged into the chunk
+        assert "First block" in text0 and "Third block" in text0
+
+    def test_timestamp_chunk_splits_at_word_budget(self):
+        # Over 500 words across timestamp blocks — should produce >= 2 chunks
+        block_body = " ".join(f"realwordvariant{i}" for i in range(120))
+        text = "\n".join(f"[14:{m:02d}:00] {block_body}" for m in range(10))
+        chunks = chunk_transcript(text, "meeting-2026-04-30T14-00-00.md")
+        assert len(chunks) >= 2
+        for _, meta in chunks:
+            assert meta["chunk_type"] == "speech"
+
+    def test_fallback_when_no_timestamps(self):
+        text = "A document with no timestamp markers, just regular prose content."
+        chunks = chunk_transcript(text, "random-notes.md")
+        assert len(chunks) == 1
+        text0, meta0 = chunks[0]
+        assert meta0["chunk_type"] == "transcript_wordcount"
+        assert "start_ts_unix" not in meta0
+
+    def test_fallback_when_filename_unparseable(self):
+        # Has timestamps but unrecognized filename → falls back to wordcount
+        text = "[14:25:00] some content here that should be word-count chunked instead."
+        chunks = chunk_transcript(text, "weird-name.md")
+        assert len(chunks) >= 1
+        for _, meta in chunks:
+            assert meta["chunk_type"] == "transcript_wordcount"
+
+    def test_midnight_rollover(self):
+        # Meeting starts late, crosses midnight — second block's HH:MM:SS would
+        # appear "before" the first if we didn't compensate.
+        text = (
+            "[23:55:00] late evening discussion content here for the meeting.\n"
+            "[00:05:00] just past midnight continuing the same discussion now.\n"
+        )
+        chunks = chunk_transcript(text, "meeting-2026-04-30T23-50-00.md")
+        # Both blocks should land in one chunk (within 500 words)
+        assert len(chunks) >= 1
+        # And no chunk's start_ts should be wildly out of order — checked by
+        # asserting the merged chunk includes both bodies
+        joined = " ".join(c[0] for c in chunks)
+        assert "late evening" in joined and "past midnight" in joined

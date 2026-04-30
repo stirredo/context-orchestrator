@@ -1,9 +1,25 @@
-"""Split text into overlapping chunks for vector indexing.
+"""Split text into chunks for vector indexing.
 
-`chunk_text` is the core chunker — pure, deterministic, no filtering.
-`is_hallucination` is a side helper used by the indexer to skip whisper-style
-junk chunks (silence-period repeats, low-entropy noise) before embedding.
+Three layers:
+  - `chunk_text`: pure word-count chunker with overlap. Used for plain
+    documents (file_chunk sources, etc.) and as a fallback.
+  - `chunk_transcript`: transcript-aware chunker. Detects `[HH:MM:SS]`
+    timestamp blocks in the body, groups adjacent blocks up to a target
+    word budget, and emits per-chunk metadata (`start_ts_unix`,
+    `start_ts_iso`, `meeting_id`, `chunk_type`). Falls back to
+    `chunk_text` for files without timestamps.
+  - `is_hallucination`: helper used by the indexer to skip whisper-style
+    junk chunks (silence-period repeats, low-entropy noise) before embed.
+
+The transcript-aware chunker is the basis for time-window queries against
+Chroma — once `start_ts_unix` is in metadata, callers can filter via
+`where: {"start_ts_unix": {"$gte": X, "$lte": Y}}` for free.
 """
+from __future__ import annotations
+
+import re
+from datetime import datetime, timezone, timedelta
+from typing import Optional
 
 # Hallucination filter thresholds. Tuned against ~/transcripts/ corpus where
 # whisper-large-v3-turbo produces "Thank you. Thank you. Thank you..." runs
@@ -14,6 +30,18 @@ HALLUCINATION_MIN_CHARS = 30
 HALLUCINATION_MIN_TOKENS = 5
 HALLUCINATION_MIN_UNIQUE_RATIO = 0.20  # unique tokens / total tokens
 HALLUCINATION_MAX_REPEAT_RUN = 5  # max consecutive identical tokens
+
+# Transcript chunking
+TRANSCRIPT_CHUNK_WORDS = 500  # target words per merged chunk
+TRANSCRIPT_MIN_CHUNK_CHARS = 20  # drop chunks shorter than this even before hallucination filter
+
+# Filename patterns we know how to date-parse for transcript timestamping.
+# meeting-capture format: meeting-YYYY-MM-DDTHH-MM-SS.md
+_MEETING_FILENAME_RE = re.compile(r"^meeting-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})\.md$")
+# Cluely / save-transcript format: YYYY-MM-DD-HHMM-<slug>.md
+_CLUELY_FILENAME_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})-")
+# Body line format: "[HH:MM:SS] body text..."
+_TS_LINE_RE = re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})\]\s*(.*)$", re.MULTILINE)
 
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
@@ -37,6 +65,95 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
         start += chunk_size - overlap
 
     return chunks
+
+
+def parse_meeting_date(filename: str) -> Optional[datetime]:
+    """Best-effort date parsing from common transcript filename formats.
+
+    Returns None if the filename doesn't look like a transcript we can
+    date — caller should fall back to word-count chunking with no
+    timestamp metadata.
+    """
+    m = _MEETING_FILENAME_RE.match(filename)
+    if m:
+        y, mo, d, h, mi, s = (int(x) for x in m.groups())
+        return datetime(y, mo, d, h, mi, s, tzinfo=timezone.utc)
+    m = _CLUELY_FILENAME_RE.match(filename)
+    if m:
+        y, mo, d, h, mi = (int(x) for x in m.groups())
+        return datetime(y, mo, d, h, mi, 0, tzinfo=timezone.utc)
+    return None
+
+
+def chunk_transcript(text: str, filename: str) -> list[tuple[str, dict]]:
+    """Chunk a transcript into (text, metadata) pairs.
+
+    For files with a recognizable date in the filename AND `[HH:MM:SS]`
+    body lines: group consecutive timestamp blocks until ~500 words per
+    chunk, emitting `start_ts_unix`, `start_ts_iso`, `meeting_id`, and
+    `chunk_type="speech"` metadata.
+
+    For other files (no parseable date or no timestamps): fall back to
+    `chunk_text` with no extra metadata. Metadata still includes
+    `chunk_type` set to `"transcript_wordcount"` so callers can
+    distinguish.
+
+    Caller is expected to add `file_path`, `filename`, `chunk_index`,
+    `total_chunks` to each chunk's metadata before indexing.
+    """
+    meeting_id = filename.rsplit(".md", 1)[0] if filename.endswith(".md") else filename
+    meeting_dt = parse_meeting_date(filename)
+    ts_matches = list(_TS_LINE_RE.finditer(text)) if meeting_dt else []
+
+    if not (meeting_dt and ts_matches):
+        # Fallback path — treat as a plain document
+        chunks = chunk_text(text)
+        return [
+            (c, {"chunk_type": "transcript_wordcount", "meeting_id": meeting_id})
+            for c in chunks
+        ]
+
+    # Timestamp-aware path — group adjacent blocks
+    out: list[tuple[str, dict]] = []
+    cur_buf: list[tuple[datetime, str]] = []
+    cur_words = 0
+    prev_ts: Optional[datetime] = None
+
+    def flush() -> None:
+        if not cur_buf:
+            return
+        start_dt = cur_buf[0][0]
+        body = " ".join(b[1] for b in cur_buf if b[1].strip())
+        if not body or len(body) < TRANSCRIPT_MIN_CHUNK_CHARS:
+            return
+        out.append((body, {
+            "chunk_type": "speech",
+            "meeting_id": meeting_id,
+            "start_ts_unix": start_dt.timestamp(),
+            "start_ts_iso": start_dt.isoformat(),
+            "n_blocks": len(cur_buf),
+        }))
+
+    for m in ts_matches:
+        h, mi, s, body = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
+        body = body.strip()
+        if not body:
+            continue
+        chunk_dt = meeting_dt.replace(hour=h, minute=mi, second=s)
+        # Handle midnight rollover within a single meeting
+        if prev_ts and chunk_dt < prev_ts:
+            chunk_dt = chunk_dt + timedelta(days=1)
+        prev_ts = chunk_dt
+        wc = len(body.split())
+        if cur_words + wc > TRANSCRIPT_CHUNK_WORDS and cur_buf:
+            flush()
+            cur_buf = []
+            cur_words = 0
+        cur_buf.append((chunk_dt, body))
+        cur_words += wc
+    flush()
+
+    return out
 
 
 def is_hallucination(text: str) -> tuple[bool, str]:

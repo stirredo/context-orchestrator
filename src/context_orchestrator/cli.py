@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from context_orchestrator.chunking import chunk_text, is_hallucination
+from context_orchestrator.chunking import chunk_transcript, is_hallucination
 from context_orchestrator.search import VectorSearch
 
 TRANSCRIPT_DIR = Path.home() / "transcripts"
@@ -20,28 +20,38 @@ def get_clipboard() -> str:
 
 
 def index_transcript(vs: VectorSearch, file_path: Path) -> int:
-    """Read a file, chunk it, filter whisper hallucinations, index the rest.
+    """Read a transcript, chunk it (timestamp-aware when possible), filter
+    whisper hallucinations, and index the rest.
 
     Returns the number of chunks actually indexed (post-filter). Skipped
     chunks are silently dropped — they have no information value.
+
+    For meeting-capture / Cluely-format transcripts (recognizable date in
+    filename + `[HH:MM:SS]` body lines), each emitted chunk carries
+    `start_ts_unix`, `start_ts_iso`, `meeting_id`, and `chunk_type="speech"`
+    metadata, enabling time-window filtering at query time via Chroma's
+    native `where` clauses.
     """
     content = file_path.read_text(encoding="utf-8")
-    chunks = chunk_text(content)
+    chunks_with_meta = chunk_transcript(content, file_path.name)
     file_str = str(file_path)
 
+    total = len(chunks_with_meta)
     indexed = 0
-    for i, chunk in enumerate(chunks):
+    for i, (chunk, meta) in enumerate(chunks_with_meta):
         is_junk, _ = is_hallucination(chunk)
         if is_junk:
             continue
         doc_id = f"transcript:{file_path.name}:{i}"
-        vs.add(doc_id, chunk, {
+        full_meta = {
             "type": "transcript",
             "file_path": file_str,
             "filename": file_path.name,
             "chunk_index": i,
-            "total_chunks": len(chunks),
-        })
+            "total_chunks": total,
+            **meta,  # chunk_type, meeting_id, start_ts_*, n_blocks (when applicable)
+        }
+        vs.add(doc_id, chunk, full_meta)
         indexed += 1
 
     return indexed
