@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Optional  # noqa: F401  (used in chunk_transcript signature)
 
 # Hallucination filter thresholds. Tuned against ~/transcripts/ corpus where
 # whisper-large-v3-turbo produces "Thank you. Thank you. Thank you..." runs
@@ -85,7 +85,11 @@ def parse_meeting_date(filename: str) -> Optional[datetime]:
     return None
 
 
-def chunk_transcript(text: str, filename: str) -> list[tuple[str, dict]]:
+def chunk_transcript(
+    text: str,
+    filename: str,
+    corrections: Optional[dict] = None,
+) -> list[tuple[str, dict]]:
     """Chunk a transcript into (text, metadata) pairs.
 
     For files with a recognizable date in the filename AND `[HH:MM:SS]`
@@ -98,9 +102,20 @@ def chunk_transcript(text: str, filename: str) -> list[tuple[str, dict]]:
     `chunk_type` set to `"transcript_wordcount"` so callers can
     distinguish.
 
+    If `corrections` is provided (a dict from lower-cased misspelled
+    token to canonical replacement), apply them to the text before
+    chunking. The on-disk source file is never modified — corrections
+    are an embedding-layer concern only.
+
     Caller is expected to add `file_path`, `filename`, `chunk_index`,
     `total_chunks` to each chunk's metadata before indexing.
     """
+    if corrections:
+        # Imported here to avoid a hard dependency cycle: chunking is core,
+        # corrections is an optional layer on top.
+        from context_orchestrator.corrections import apply as _apply_corrections
+        text = _apply_corrections(text, corrections)
+
     meeting_id = filename.rsplit(".md", 1)[0] if filename.endswith(".md") else filename
     meeting_dt = parse_meeting_date(filename)
     ts_matches = list(_TS_LINE_RE.finditer(text)) if meeting_dt else []

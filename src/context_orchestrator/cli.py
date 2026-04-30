@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from context_orchestrator.chunking import chunk_transcript, is_hallucination
+from context_orchestrator.corrections import load_corrections
 from context_orchestrator.search import VectorSearch
 
 TRANSCRIPT_DIR = Path.home() / "transcripts"
@@ -33,7 +34,8 @@ def index_transcript(vs: VectorSearch, file_path: Path) -> int:
     native `where` clauses.
     """
     content = file_path.read_text(encoding="utf-8")
-    chunks_with_meta = chunk_transcript(content, file_path.name)
+    corrections = load_corrections()
+    chunks_with_meta = chunk_transcript(content, file_path.name, corrections=corrections)
     file_str = str(file_path)
 
     total = len(chunks_with_meta)
