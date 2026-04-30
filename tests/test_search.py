@@ -63,3 +63,53 @@ class TestVectorSearch:
         vs.add("doc1", "Content 1", {"type": "test"})
         vs.add("doc2", "Content 2", {"type": "test"})
         assert vs.count() == 2
+
+
+class TestMMR:
+    def test_mmr_returns_n_results(self, vs):
+        # Add 6 docs about overlapping topics
+        vs.add("a1", "PostgreSQL database connection pooling configuration", {"file": "a"})
+        vs.add("a2", "PostgreSQL replication failover and read replicas", {"file": "a"})
+        vs.add("a3", "PostgreSQL query planner and index tuning", {"file": "a"})
+        vs.add("b1", "Redis caching strategy with TTL keys", {"file": "b"})
+        vs.add("b2", "Redis cluster sharding and resharding", {"file": "b"})
+        vs.add("c1", "Kafka topic partitioning and consumer groups", {"file": "c"})
+
+        results = vs.search("database query performance", n_results=4, mmr=True)
+        assert len(results) == 4
+        # All results have id, text, metadata, distance — but no embedding
+        assert "embedding" not in results[0]
+        assert "sim_to_query" not in results[0]
+
+    def test_mmr_increases_file_diversity(self, vs):
+        # Heavily-clustered corpus: 5 PG docs + 2 Redis + 1 Kafka
+        for i in range(5):
+            vs.add(f"pg{i}", f"PostgreSQL transaction isolation level {i}", {"file": "postgres"})
+        for i in range(2):
+            vs.add(f"r{i}", f"Redis pub/sub channel pattern {i}", {"file": "redis"})
+        vs.add("k1", "Kafka topic compaction policy", {"file": "kafka"})
+
+        # Vanilla cosine ranking: top-3 likely all PG (highest topical match)
+        vanilla = vs.search("database transactions", n_results=3, mmr=False)
+        vanilla_files = {r["metadata"]["file"] for r in vanilla}
+
+        # MMR should pull in distinct files
+        mmr = vs.search("database transactions", n_results=3, mmr=True, mmr_lambda=0.5)
+        mmr_files = {r["metadata"]["file"] for r in mmr}
+
+        # MMR should produce >= as many distinct files as vanilla, often more
+        assert len(mmr_files) >= len(vanilla_files)
+
+    def test_mmr_lambda_one_is_pure_relevance(self, vs):
+        for i in range(5):
+            vs.add(f"d{i}", f"PostgreSQL replication topology variant {i}", {"file": "pg"})
+        vs.add("other", "Completely unrelated text about cooking pasta", {"file": "other"})
+
+        # λ=1.0 → top-K should be the topically-best matches
+        results = vs.search("PostgreSQL replication", n_results=3, mmr=True, mmr_lambda=1.0)
+        assert all("PostgreSQL" in r["text"] for r in results)
+
+    def test_mmr_handles_small_corpus(self, vs):
+        vs.add("doc1", "Single document in the corpus", {"type": "x"})
+        results = vs.search("document", n_results=5, mmr=True)
+        assert len(results) == 1
