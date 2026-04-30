@@ -12,6 +12,17 @@ DEFAULT_CHROMA_PATH = Path.home() / ".context-orchestrator" / "chroma"
 DEFAULT_CHROMA_HOST = "127.0.0.1"
 DEFAULT_CHROMA_PORT = 8765
 
+# Optional embedding-model override. When unset, Chroma's default
+# all-MiniLM-L6-v2 is used (384d, 256-token cap, no extra deps).
+#
+# To upgrade to a longer-context / higher-quality model:
+#   pip install -e '.[embeddings]'
+#   export CO_EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5
+#
+# The new model produces vectors with different dimensionality, so
+# existing collections must be wiped before the first run.
+EMBEDDING_MODEL_ENV = "CO_EMBEDDING_MODEL"
+
 # MMR re-rank knobs. Lambda 1.0 = pure relevance (no diversity); 0.0 = pure
 # diversity (ignore relevance). 0.7 is empirically a good balance for
 # transcript-heavy corpora — keeps top-3 strictly on-topic, then opens up.
@@ -34,6 +45,33 @@ def _cosine(a, b) -> float:
     a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
     denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12
     return float(np.dot(a, b) / denom)
+
+
+def _build_embedding_function():
+    """Construct a Chroma EmbeddingFunction for the user-configured model.
+
+    Returns None when no override is set (Chroma falls back to its built-in
+    default, all-MiniLM-L6-v2). Returns a SentenceTransformerEmbeddingFunction
+    otherwise. Raises a clear error if the user requested a custom model but
+    the optional `[embeddings]` extra isn't installed.
+    """
+    model_name = os.environ.get(EMBEDDING_MODEL_ENV)
+    if not model_name:
+        return None
+    try:
+        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+    except ImportError as e:
+        raise RuntimeError(
+            f"{EMBEDDING_MODEL_ENV}={model_name} requires the 'embeddings' "
+            "extra. Install with: pip install -e '.[embeddings]'"
+        ) from e
+    # trust_remote_code is required for nomic-embed and similar custom-arch
+    # models. It's safe here because the model name is user-controlled and
+    # they explicitly opted in via env var.
+    return SentenceTransformerEmbeddingFunction(
+        model_name=model_name,
+        trust_remote_code=True,
+    )
 
 
 def _bm25_tokenize(text: str) -> list[str]:
@@ -117,10 +155,14 @@ class VectorSearch:
             self.client = chromadb.PersistentClient(path=str(self.chroma_path))
         else:
             self.client = chromadb.HttpClient(host=self.host, port=self.port)
-        self.collection = self.client.get_or_create_collection(
-            name="context",
-            metadata={"hnsw:space": "cosine"},
-        )
+        kwargs: dict = {
+            "name": "context",
+            "metadata": {"hnsw:space": "cosine"},
+        }
+        ef = _build_embedding_function()
+        if ef is not None:
+            kwargs["embedding_function"] = ef
+        self.collection = self.client.get_or_create_collection(**kwargs)
 
     def reload(self) -> None:
         """Reconnect to disk so writes from other processes (e.g. the watcher) become visible."""

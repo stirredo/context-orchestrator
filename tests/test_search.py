@@ -169,3 +169,25 @@ class TestHybridSearch:
         results2 = vs.search("Megatune", n_results=3, hybrid=True)
         ids = [r["id"] for r in results2]
         assert "doc2" in ids
+
+
+class TestEmbeddingModelOverride:
+    def test_default_returns_none(self, monkeypatch):
+        from context_orchestrator.search import _build_embedding_function, EMBEDDING_MODEL_ENV
+        monkeypatch.delenv(EMBEDDING_MODEL_ENV, raising=False)
+        assert _build_embedding_function() is None
+
+    def test_env_set_returns_callable_or_clear_error(self, monkeypatch):
+        # If sentence-transformers IS installed (the embeddings extra), this
+        # returns an EmbeddingFunction. If NOT installed, raises RuntimeError
+        # with a clear message pointing the user at the extra.
+        from context_orchestrator.search import _build_embedding_function, EMBEDDING_MODEL_ENV
+        monkeypatch.setenv(EMBEDDING_MODEL_ENV, "all-MiniLM-L6-v2")
+        try:
+            ef = _build_embedding_function()
+            assert ef is not None
+            # Don't actually call it — would download the model. The signature is
+            # callable(list[str]) -> list[list[float]] but we only need to verify
+            # construction works.
+        except RuntimeError as e:
+            assert "embeddings" in str(e).lower()

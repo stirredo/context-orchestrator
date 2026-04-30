@@ -16,6 +16,16 @@ context-orchestrator-chroma = "context_orchestrator.chroma_daemon:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+# Optional embedding upgrades. Install with:
+#   pip install -e '.[embeddings]'
+# Then set CO_EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5 (or any
+# sentence-transformers model name). Note: switching the model
+# invalidates existing vectors — wipe the collection / chroma path
+# first so HNSW dimensions match.
+embeddings = [
+    "sentence-transformers>=2.0",
+    "einops>=0.6",  # required by nomic-embed-text-v1.5
+]
 
 [build-system]
 requires = ["hatchling"]
