@@ -191,3 +191,54 @@ class TestEmbeddingModelOverride:
             # construction works.
         except RuntimeError as e:
             assert "embeddings" in str(e).lower()
+
+    def test_gemini_dispatch_routes_to_gemini_branch(self, monkeypatch, tmp_path):
+        """Gemini-prefixed model names must take the Gemini code path."""
+        from context_orchestrator import search as s
+        monkeypatch.setenv(s.EMBEDDING_MODEL_ENV, "gemini-embedding-001")
+        # Provide a key from a temp file so we don't need real env
+        key_file = tmp_path / "key"
+        key_file.write_text("fake-api-key-for-test\n")
+        monkeypatch.setattr(s, "GEMINI_KEY_FILE", key_file)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        try:
+            ef = s._build_embedding_function()
+            # If google-genai IS installed, ef is callable and has name() returning gemini-*
+            assert callable(ef)
+            assert "gemini" in ef.name()
+        except RuntimeError as e:
+            # If google-genai is NOT installed, error must reference the extra
+            msg = str(e).lower()
+            assert "embeddings-gemini" in msg or "google-genai" in msg
+
+    def test_gemini_without_key_raises_clear_error(self, monkeypatch, tmp_path):
+        from context_orchestrator import search as s
+        monkeypatch.setenv(s.EMBEDDING_MODEL_ENV, "gemini-embedding-001")
+        # Point the key file at a non-existent path AND clear env vars
+        monkeypatch.setattr(s, "GEMINI_KEY_FILE", tmp_path / "nope")
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        try:
+            s._build_embedding_function()
+        except RuntimeError as e:
+            msg = str(e)
+            # Either "needs a Gemini API key" (extra installed, key missing)
+            # OR "embeddings-gemini" (extra missing, error happens earlier).
+            assert ("API key" in msg) or ("embeddings-gemini" in msg)
+        else:
+            # Should not succeed without a key — but if google-genai isn't
+            # installed and we somehow reach here, fail loudly.
+            assert False, "expected RuntimeError without API key"
+
+    def test_resolve_key_prefers_env(self, monkeypatch, tmp_path):
+        from context_orchestrator import search as s
+        key_file = tmp_path / "key"
+        key_file.write_text("from-file-key\n")
+        monkeypatch.setattr(s, "GEMINI_KEY_FILE", key_file)
+        monkeypatch.setenv("GOOGLE_API_KEY", "from-env-key")
+        assert s._resolve_gemini_api_key() == "from-env-key"
+        # When env unset, fall back to file
+        monkeypatch.delenv("GOOGLE_API_KEY")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        assert s._resolve_gemini_api_key() == "from-file-key"

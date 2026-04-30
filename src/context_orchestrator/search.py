@@ -15,13 +15,20 @@ DEFAULT_CHROMA_PORT = 8765
 # Optional embedding-model override. When unset, Chroma's default
 # all-MiniLM-L6-v2 is used (384d, 256-token cap, no extra deps).
 #
-# To upgrade to a longer-context / higher-quality model:
-#   pip install -e '.[embeddings]'
-#   export CO_EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5
+# Two upgrade paths:
+#   1) Local sentence-transformers (e.g. nomic — 768d, 8k context):
+#        pip install -e '.[embeddings]'
+#        export CO_EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5
+#   2) Hosted Gemini (3072d, top-MTEB, asymmetric retrieval):
+#        pip install -e '.[embeddings-gemini]'
+#        export CO_EMBEDDING_MODEL=gemini-embedding-001
+#        # API key from GOOGLE_API_KEY/GEMINI_API_KEY env or
+#        # ~/.config/google/key (mode 600)
 #
-# The new model produces vectors with different dimensionality, so
-# existing collections must be wiped before the first run.
+# Switching invalidates existing vectors — wipe the collection /
+# chroma path first so HNSW dimensions match.
 EMBEDDING_MODEL_ENV = "CO_EMBEDDING_MODEL"
+GEMINI_KEY_FILE = Path.home() / ".config" / "google" / "key"
 
 # MMR re-rank knobs. Lambda 1.0 = pure relevance (no diversity); 0.0 = pure
 # diversity (ignore relevance). 0.7 is empirically a good balance for
@@ -47,17 +54,36 @@ def _cosine(a, b) -> float:
     return float(np.dot(a, b) / denom)
 
 
+def _resolve_gemini_api_key() -> Optional[str]:
+    """Look up the Gemini API key in env first, then ~/.config/google/key."""
+    for var in ("GOOGLE_API_KEY", "GEMINI_API_KEY"):
+        v = os.environ.get(var)
+        if v:
+            return v.strip()
+    if GEMINI_KEY_FILE.exists():
+        try:
+            return GEMINI_KEY_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+    return None
+
+
 def _build_embedding_function():
     """Construct a Chroma EmbeddingFunction for the user-configured model.
 
     Returns None when no override is set (Chroma falls back to its built-in
-    default, all-MiniLM-L6-v2). Returns a SentenceTransformerEmbeddingFunction
-    otherwise. Raises a clear error if the user requested a custom model but
-    the optional `[embeddings]` extra isn't installed.
+    default, all-MiniLM-L6-v2). Dispatches by model-name prefix:
+      - "gemini-*" → hosted Gemini embedder (requires `[embeddings-gemini]`)
+      - everything else → local SentenceTransformer (requires `[embeddings]`)
+
+    Raises a clear error if the requested backend's optional extra isn't
+    installed or if Gemini credentials are missing.
     """
     model_name = os.environ.get(EMBEDDING_MODEL_ENV)
     if not model_name:
         return None
+    if model_name.startswith("gemini-"):
+        return _build_gemini_embedding_function(model_name)
     try:
         from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
     except ImportError as e:
@@ -72,6 +98,51 @@ def _build_embedding_function():
         model_name=model_name,
         trust_remote_code=True,
     )
+
+
+def _build_gemini_embedding_function(model_name: str):
+    """Construct a Chroma-compatible EmbeddingFunction backed by Gemini.
+
+    Uses task_type=RETRIEVAL_DOCUMENT for both indexing and queries (Chroma
+    doesn't distinguish in the EmbeddingFunction API, and document-typed
+    embeddings still match queries reasonably for RAG-style retrieval).
+
+    For asymmetric retrieval where the cost of separate query embeddings
+    matters, callers can construct two collections.
+    """
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as e:
+        raise RuntimeError(
+            f"{EMBEDDING_MODEL_ENV}={model_name} requires the "
+            "'embeddings-gemini' extra. Install with: "
+            "pip install -e '.[embeddings-gemini]'"
+        ) from e
+    api_key = _resolve_gemini_api_key()
+    if not api_key:
+        raise RuntimeError(
+            f"{EMBEDDING_MODEL_ENV}={model_name} needs a Gemini API key. "
+            "Set GOOGLE_API_KEY or GEMINI_API_KEY, or write the key to "
+            f"{GEMINI_KEY_FILE} (mode 600)."
+        )
+    client = genai.Client(api_key=api_key)
+
+    class _GeminiEF:
+        """Chroma EmbeddingFunction protocol: a callable taking list[str]
+        and returning list[list[float]], plus a name() method."""
+        def name(self) -> str:
+            return f"gemini-{model_name}"
+
+        def __call__(self, input):
+            result = client.models.embed_content(
+                model=model_name,
+                contents=input,
+                config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
+            )
+            return [e.values for e in result.embeddings]
+
+    return _GeminiEF()
 
 
 def _bm25_tokenize(text: str) -> list[str]:

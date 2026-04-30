@@ -26,6 +26,16 @@ embeddings = [
     "sentence-transformers>=2.0",
     "einops>=0.6",  # required by nomic-embed-text-v1.5
 ]
+# Gemini embeddings + reranker via Google's API. Install with:
+#   pip install -e '.[embeddings-gemini]'
+# Then set:
+#   CO_EMBEDDING_MODEL=gemini-embedding-001    (3072d, top-MTEB)
+#   CO_RERANK_MODEL=gemini-flash-latest        (LLM rerank — see search.py)
+# API key is read from $GOOGLE_API_KEY, $GEMINI_API_KEY, or
+# ~/.config/google/key (mode 600).
+embeddings-gemini = [
+    "google-genai>=0.3",
+]
 
 [build-system]
 requires = ["hatchling"]
