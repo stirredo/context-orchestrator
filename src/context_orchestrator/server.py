@@ -398,27 +398,109 @@ def get_repo_knowledge(repo_url: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
-def search(query: str, project: str = "") -> str:
-    """Semantic search across ALL stored knowledge — task sources, repo knowledge, notes.
+def _parse_iso_date(s: str):
+    """Parse a date or datetime string to a unix timestamp. Accepts:
+        - "2026-04-30"           (date only — interpreted as 00:00 UTC)
+        - "2026-04-30T14:25:00"  (no tz — interpreted as UTC)
+        - "2026-04-30T14:25:00+00:00"  (full ISO 8601)
+    Returns None if unparseable.
+    """
+    from datetime import datetime, timezone
+    try:
+        if "T" not in s:
+            s = s + "T00:00:00"
+        if not s.endswith("Z") and "+" not in s and "-" not in s.split("T", 1)[1]:
+            s = s + "+00:00"
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except (ValueError, IndexError):
+        return None
 
-    Use this when you need to find relevant information without knowing which task or repo it belongs to.
-    This searches across everything and returns the most relevant results.
+
+@mcp.tool()
+def search(
+    query: str,
+    project: str = "",
+    after_date: str = "",
+    before_date: str = "",
+    meeting_id: str = "",
+) -> str:
+    """Semantic search across ALL stored knowledge — task sources, repo knowledge,
+    transcript chunks, and notes.
+
+    The retrieval pipeline is BM25 + dense vector hybrid (Reciprocal Rank Fusion)
+    re-ranked with MMR for diversity, so proper-noun queries (engineer names,
+    product codenames) work as well as paraphrased questions.
 
     Args:
-        query: Natural language search query (e.g., "how to run tests", "auth flow discussion")
-        project: Optional git remote URL to limit search to a specific project's tasks
+        query: Natural language query (e.g., "what did we decide about Megatune",
+            "Gang Chu shadow queue context", "Lyft Teen brand awareness").
+            Proper nouns are matched lexically AND semantically.
+        project: Optional git remote URL to limit search to a project's tasks.
+            Falls back to global search if no results.
+        after_date: Optional ISO date/datetime — only return chunks captured at
+            or after this point. Examples: "2026-04-29", "2026-04-30T14:00:00".
+            Useful for "what happened in the last meeting" / "this week" queries.
+        before_date: Optional ISO date/datetime — only return chunks captured at
+            or before this point. Pair with `after_date` for time-window queries.
+        meeting_id: Optional exact match on a transcript filename stem (without
+            .md). Use when you know which meeting holds the answer and want
+            chunks scoped to it. Example: "meeting-2026-04-30T13-40-35".
+
+    Project filter and time-window filter are applied via Chroma's native
+    metadata `where` clause — they constrain the dense retriever. When any
+    filter is specified, hybrid mode is disabled (BM25 is unfiltered).
     """
     vs.reload()  # pick up writes from the watcher / other processes
-    where = None
-    if project:
-        where = {"project": project}
 
-    hits = vs.search(query, n_results=10, where=where)
+    # Build metadata filter
+    filters = []
+    if project:
+        filters.append({"project": project})
+    if after_date:
+        ts = _parse_iso_date(after_date)
+        if ts is not None:
+            filters.append({"start_ts_unix": {"$gte": ts}})
+    if before_date:
+        ts = _parse_iso_date(before_date)
+        if ts is not None:
+            filters.append({"start_ts_unix": {"$lte": ts}})
+    if meeting_id:
+        filters.append({"meeting_id": meeting_id})
+
+    where = None
+    if len(filters) == 1:
+        where = filters[0]
+    elif len(filters) > 1:
+        where = {"$and": filters}
+
+    # When filters are in play, hybrid is incompatible (BM25 is unfiltered).
+    # Otherwise default to hybrid + MMR for best general-purpose ranking.
+    use_hybrid = where is None
+    hits = vs.search(
+        query,
+        n_results=10,
+        where=where,
+        hybrid=use_hybrid,
+        mmr=True,
+        mmr_lambda=0.7,
+    )
     if not hits:
-        # Try without project filter as fallback (repo knowledge is not project-scoped)
-        if project:
-            hits = vs.search(query, n_results=10)
+        # Fallback: drop the project filter (repo knowledge isn't project-scoped)
+        if project and where:
+            other_filters = [f for f in filters if "project" not in f]
+            fallback_where = (
+                None if not other_filters
+                else other_filters[0] if len(other_filters) == 1
+                else {"$and": other_filters}
+            )
+            hits = vs.search(
+                query,
+                n_results=10,
+                where=fallback_where,
+                hybrid=fallback_where is None,
+                mmr=True,
+                mmr_lambda=0.7,
+            )
         if not hits:
             return f"No results for '{query}'."
 
@@ -440,6 +522,13 @@ def search(query: str, project: str = "") -> str:
             lines.append(f"  [task: {meta.get('task_name', '?')}] ({meta.get('source_type', '?')}) {h['text'][:200]}")
         elif doc_type == "source_notes":
             lines.append(f"  [task: {meta.get('task_name', '?')}] note on {meta.get('reference', '?')}: {h['text']}")
+        elif doc_type == "transcript":
+            ts = meta.get("start_ts_iso", "")
+            ts_prefix = f"{ts} " if ts else ""
+            lines.append(
+                f"  [transcript: {meta.get('meeting_id', meta.get('filename', '?'))}] "
+                f"{ts_prefix}{h['text'][:200]}"
+            )
         else:
             lines.append(f"  [{doc_type}] {h['text'][:200]}")
 
