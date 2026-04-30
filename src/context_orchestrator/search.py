@@ -45,6 +45,17 @@ DEFAULT_RRF_K = 60
 # How many candidates each retriever should pull before fusion.
 HYBRID_FETCH_PER_RETRIEVER = 50
 
+# Optional LLM re-rank. When `rerank=True` is passed to `search()` (or the
+# MCP tool exposes it), top-N candidates are sent to the configured LLM
+# for relevance scoring; results are re-ordered by score.
+#
+# Default model is read from CO_RERANK_MODEL. If unset, no LLM rerank is
+# performed even when `rerank=True` is requested (returns base ranking).
+RERANK_MODEL_ENV = "CO_RERANK_MODEL"
+# How many candidates to pull through the LLM. Bigger = higher quality
+# top-K but more tokens spent. 30 matched empirical sweet-spot in eval.
+RERANK_FETCH = 30
+
 
 def _cosine(a, b) -> float:
     """Cosine similarity between two embedding vectors."""
@@ -143,6 +154,87 @@ def _build_gemini_embedding_function(model_name: str):
             return [e.values for e in result.embeddings]
 
     return _GeminiEF()
+
+
+def _llm_rerank(query: str, candidates: list[dict], n_results: int,
+                model: str) -> list[dict]:
+    """Re-rank `candidates` by sending (query, chunk) pairs to an LLM and
+    sorting by the LLM's relevance score (0-10 scale).
+
+    Currently supports model names starting with "gemini-" (Google).
+    Returns up to `n_results` candidates ordered by score desc. On any
+    error (parse failure, API error, missing extra), logs a warning and
+    falls back to the input ordering — never raises so callers don't have
+    to wrap.
+    """
+    if not candidates:
+        return []
+    if model.startswith("gemini-"):
+        return _llm_rerank_gemini(query, candidates, n_results, model)
+    logger.warning(f"unknown rerank model {model!r}; returning base ranking")
+    return candidates[:n_results]
+
+
+def _llm_rerank_gemini(query: str, candidates: list[dict], n_results: int,
+                       model: str) -> list[dict]:
+    """Gemini-backed implementation of the LLM rerank step. Soft-fails to
+    base ordering on any error."""
+    import json as _json
+    import re as _re
+    try:
+        from google import genai
+    except ImportError:
+        logger.warning(
+            f"rerank model {model} requires the 'embeddings-gemini' extra; "
+            "falling back to base ranking"
+        )
+        return candidates[:n_results]
+    api_key = _resolve_gemini_api_key()
+    if not api_key:
+        logger.warning(
+            "no Gemini API key found for rerank; falling back to base ranking"
+        )
+        return candidates[:n_results]
+
+    client = genai.Client(api_key=api_key)
+    fetch_n = min(len(candidates), RERANK_FETCH)
+    block = "\n".join(
+        f"[{i}] {(c.get('text') or '')[:240].replace(chr(10), ' ')}"
+        for i, c in enumerate(candidates[:fetch_n])
+    )
+    prompt = (
+        f"Re-rank these search candidates for the query:\n\nQUERY: {query}\n\n"
+        f"CANDIDATES:\n{block}\n\n"
+        "For each candidate, score 0-10 for how directly it answers the "
+        "query (10=direct answer, 7-9=strongly relevant, 4-6=adjacent, "
+        "0-3=off-topic or noise). Return ONLY a JSON array like "
+        '[{"i": 0, "score": 8}, ...]. No prose, no markdown.'
+    )
+    try:
+        resp = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config={"temperature": 0.0, "response_mime_type": "application/json"},
+        )
+        text = resp.text or ""
+    except Exception as e:
+        logger.warning(f"rerank API call failed ({e}); falling back to base ranking")
+        return candidates[:n_results]
+
+    try:
+        m = _re.search(r"\[.*\]", text, _re.DOTALL)
+        if not m:
+            raise ValueError("no JSON array in response")
+        decisions = _json.loads(m.group(0))
+        scores = {int(d["i"]): float(d["score"]) for d in decisions if "i" in d}
+    except Exception as e:
+        logger.warning(f"rerank parse failed ({e}); falling back to base ranking")
+        return candidates[:n_results]
+
+    # Reorder by score; tied/missing candidates keep their original position
+    indexed = list(enumerate(candidates[:fetch_n]))
+    indexed.sort(key=lambda x: (-scores.get(x[0], -1.0), x[0]))
+    return [c for _, c in indexed[:n_results]]
 
 
 def _bm25_tokenize(text: str) -> list[str]:
@@ -293,6 +385,8 @@ class VectorSearch:
         mmr: bool = False,
         mmr_lambda: float = DEFAULT_MMR_LAMBDA,
         hybrid: bool = False,
+        rerank: bool = False,
+        rerank_model: Optional[str] = None,
     ) -> list[dict]:
         """Semantic search across all indexed documents.
 
@@ -311,14 +405,38 @@ class VectorSearch:
                 Default False. Compatible with `mmr` (MMR is applied AFTER
                 fusion). Note: incompatible with `where` filtering — hybrid
                 runs across the full corpus.
+            rerank: when True, send top-N candidates (default 30) through
+                an LLM for relevance scoring and re-rank by the LLM's score.
+                Particularly good at recognising "no match exists" — assigns
+                low scores when nothing in the corpus actually answers the
+                query. Default False.
+            rerank_model: override the LLM (default reads CO_RERANK_MODEL
+                env var, e.g. "gemini-flash-latest"). Soft-fails to base
+                ranking if the model can't be reached or no key is set.
         """
         total = self.collection.count() or 1
 
+        # Resolve the rerank model up front so misconfig fails loudly only
+        # when actually requested.
+        rr_model = None
+        if rerank:
+            rr_model = rerank_model or os.environ.get(RERANK_MODEL_ENV)
+
         if hybrid:
-            return self._hybrid_search(query, n_results, mmr, mmr_lambda)
+            base = self._hybrid_search(
+                query,
+                n_results=(RERANK_FETCH if rr_model else n_results),
+                mmr=mmr,
+                mmr_lambda=mmr_lambda,
+            )
+            if rr_model:
+                return _llm_rerank(query, base, n_results, rr_model)
+            return base
 
         if mmr:
-            fetch_n = min(total, max(MMR_CANDIDATE_MIN, n_results * MMR_CANDIDATE_MULTIPLIER))
+            # If reranking, fetch enough for the rerank stage
+            mmr_target = RERANK_FETCH if rr_model else n_results
+            fetch_n = min(total, max(MMR_CANDIDATE_MIN, mmr_target * MMR_CANDIDATE_MULTIPLIER))
             kwargs = {
                 "query_texts": [query],
                 "n_results": fetch_n,
@@ -342,17 +460,21 @@ class VectorSearch:
                     "sim_to_query": sim,
                     "embedding": results["embeddings"][0][i],
                 })
-            reranked = _mmr_select(candidates, n_results, lam=mmr_lambda)
+            reranked = _mmr_select(candidates, mmr_target, lam=mmr_lambda)
             # Strip the embedding before returning — callers don't need it.
-            return [
+            stripped = [
                 {k: v for k, v in c.items() if k not in ("embedding", "sim_to_query")}
                 for c in reranked
             ]
+            if rr_model:
+                return _llm_rerank(query, stripped, n_results, rr_model)
+            return stripped
 
         # Standard path: raw cosine top-K
+        fetch_for_base = RERANK_FETCH if rr_model else n_results
         kwargs = {
             "query_texts": [query],
-            "n_results": min(n_results, total),
+            "n_results": min(fetch_for_base, total),
         }
         if where:
             kwargs["where"] = where
@@ -368,6 +490,8 @@ class VectorSearch:
                     "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
                     "distance": results["distances"][0][i] if results["distances"] else None,
                 })
+        if rr_model:
+            return _llm_rerank(query, hits, n_results, rr_model)
         return hits
 
     def _hybrid_search(

@@ -423,6 +423,7 @@ def search(
     after_date: str = "",
     before_date: str = "",
     meeting_id: str = "",
+    rerank: bool = False,
 ) -> str:
     """Semantic search across ALL stored knowledge — task sources, repo knowledge,
     transcript chunks, and notes.
@@ -445,6 +446,14 @@ def search(
         meeting_id: Optional exact match on a transcript filename stem (without
             .md). Use when you know which meeting holds the answer and want
             chunks scoped to it. Example: "meeting-2026-04-30T13-40-35".
+        rerank: When True, send the top candidates through an LLM (configured
+            via the CO_RERANK_MODEL env var, e.g. "gemini-flash-latest") for
+            relevance scoring and re-rank by score. Adds 1-3s latency and a
+            small per-query cost, but corrects cases where vector search
+            surfaces tangentially-related chunks instead of true matches —
+            and crucially can recognise when no chunk in the corpus actually
+            answers the query. Use for important queries; skip for
+            speculative or exploratory ones.
 
     Project filter and time-window filter are applied via Chroma's native
     metadata `where` clause — they constrain the dense retriever. When any
@@ -483,6 +492,7 @@ def search(
         hybrid=use_hybrid,
         mmr=True,
         mmr_lambda=0.7,
+        rerank=rerank,
     )
     if not hits:
         # Fallback: drop the project filter (repo knowledge isn't project-scoped)
@@ -500,6 +510,7 @@ def search(
                 hybrid=fallback_where is None,
                 mmr=True,
                 mmr_lambda=0.7,
+                rerank=rerank,
             )
         if not hits:
             return f"No results for '{query}'."

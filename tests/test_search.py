@@ -242,3 +242,50 @@ class TestEmbeddingModelOverride:
         monkeypatch.delenv("GOOGLE_API_KEY")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         assert s._resolve_gemini_api_key() == "from-file-key"
+
+
+class TestLLMRerank:
+    def test_rerank_off_by_default(self, vs):
+        # Without rerank flag, behavior identical to before
+        vs.add("a", "PostgreSQL replication failover", {"file": "a"})
+        vs.add("b", "Redis pub/sub channels", {"file": "b"})
+        results = vs.search("database", n_results=2)
+        assert len(results) == 2
+
+    def test_rerank_unknown_model_falls_back(self, vs, monkeypatch):
+        from context_orchestrator import search as s
+        # Force the rerank dispatcher down a path that would log + fall back
+        monkeypatch.setattr(s.logger, "warning", lambda *a, **k: None)
+        vs.add("a", "PostgreSQL replication failover", {"file": "a"})
+        vs.add("b", "Redis pub/sub channels", {"file": "b"})
+        results = vs.search("database", n_results=2, rerank=True,
+                            rerank_model="unknown-provider-xyz")
+        # Soft-fail to base ranking — must still return results
+        assert len(results) == 2
+
+    def test_rerank_no_env_no_arg_is_noop(self, vs, monkeypatch):
+        from context_orchestrator import search as s
+        monkeypatch.delenv(s.RERANK_MODEL_ENV, raising=False)
+        vs.add("a", "PostgreSQL replication failover", {"file": "a"})
+        vs.add("b", "Redis pub/sub channels", {"file": "b"})
+        # rerank=True but no model configured — should run base path
+        results = vs.search("database", n_results=2, rerank=True)
+        assert len(results) == 2
+
+    def test_rerank_env_var_picked_up(self, vs, monkeypatch, tmp_path):
+        from context_orchestrator import search as s
+        # Configure env to point at gemini, but no key — should soft-fail
+        monkeypatch.setenv(s.RERANK_MODEL_ENV, "gemini-flash-latest")
+        monkeypatch.setattr(s, "GEMINI_KEY_FILE", tmp_path / "nope")
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setattr(s.logger, "warning", lambda *a, **k: None)
+        vs.add("a", "PostgreSQL replication failover", {"file": "a"})
+        vs.add("b", "Redis pub/sub channels", {"file": "b"})
+        results = vs.search("database", n_results=2, rerank=True)
+        # No key → soft-fail → base ranking still returned
+        assert len(results) == 2
+
+    def test_rerank_helper_handles_empty_candidates(self):
+        from context_orchestrator.search import _llm_rerank
+        assert _llm_rerank("query", [], 5, "gemini-flash-latest") == []
