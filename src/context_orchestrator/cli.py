@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from context_orchestrator.chunking import chunk_text
+from context_orchestrator.chunking import chunk_text, is_hallucination
 from context_orchestrator.search import VectorSearch
 
 TRANSCRIPT_DIR = Path.home() / "transcripts"
@@ -20,12 +20,20 @@ def get_clipboard() -> str:
 
 
 def index_transcript(vs: VectorSearch, file_path: Path) -> int:
-    """Read a file, chunk it, and index in ChromaDB. Returns chunk count."""
+    """Read a file, chunk it, filter whisper hallucinations, index the rest.
+
+    Returns the number of chunks actually indexed (post-filter). Skipped
+    chunks are silently dropped — they have no information value.
+    """
     content = file_path.read_text(encoding="utf-8")
     chunks = chunk_text(content)
     file_str = str(file_path)
 
+    indexed = 0
     for i, chunk in enumerate(chunks):
+        is_junk, _ = is_hallucination(chunk)
+        if is_junk:
+            continue
         doc_id = f"transcript:{file_path.name}:{i}"
         vs.add(doc_id, chunk, {
             "type": "transcript",
@@ -34,8 +42,9 @@ def index_transcript(vs: VectorSearch, file_path: Path) -> int:
             "chunk_index": i,
             "total_chunks": len(chunks),
         })
+        indexed += 1
 
-    return len(chunks)
+    return indexed
 
 
 def main():

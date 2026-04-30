@@ -22,8 +22,12 @@ class TestIndexTranscript:
         assert vs.count() == 1
 
     def test_index_long_transcript(self, vs):
+        # Distinct tokens per word — guarantees uniqueness ratio is high so the
+        # hallucination filter doesn't drop these chunks. (Same-word filler like
+        # "word " * 1200 would correctly be dropped as low-entropy junk.)
+        text = " ".join(f"token{i}" for i in range(1200))
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            f.write("word " * 1200)
+            f.write(text)
             f.flush()
             num_chunks = index_transcript(vs, Path(f.name))
         assert num_chunks >= 3

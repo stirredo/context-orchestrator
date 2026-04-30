@@ -1,4 +1,4 @@
-from context_orchestrator.chunking import chunk_text
+from context_orchestrator.chunking import chunk_text, is_hallucination
 
 
 class TestChunking:
@@ -35,3 +35,63 @@ class TestChunking:
         chunks = chunk_text("", chunk_size=500)
         assert len(chunks) == 1
         assert chunks[0] == ""
+
+
+class TestHallucinationFilter:
+    def test_real_speech_passes(self):
+        text = (
+            "So we'll start with the Lyft features. What we're looking at on the left is "
+            "awareness of the brand and then historic usage if they've actually used this."
+        )
+        is_junk, _ = is_hallucination(text)
+        assert is_junk is False
+
+    def test_short_chunk_dropped(self):
+        is_junk, reason = is_hallucination("Thank you.")
+        assert is_junk is True
+        assert "short" in reason or "few_tokens" in reason
+
+    def test_alright_cascade_dropped(self):
+        # Real example from meeting-2026-04-30T13-40-35.md — 200+ "Alright"s
+        text = "Alright " * 200
+        is_junk, reason = is_hallucination(text)
+        assert is_junk is True
+        assert "repeat_run" in reason or "low_uniqueness" in reason
+
+    def test_thank_you_run_dropped(self):
+        text = "Thank you. " * 30
+        is_junk, reason = is_hallucination(text)
+        assert is_junk is True
+
+    def test_low_unique_ratio_dropped(self):
+        # 14 unique tokens in 356 — taken from real silence-hallucination chunk
+        text = (
+            "Thank you. Alright, I have to do it. Alright, I have to do it. "
+            "Thank you. Thank you. Alright, I have to do it. Thank you. "
+            "Alright, I have to do this one. Thank you. Thank you. Thank you."
+        ) * 8
+        is_junk, reason = is_hallucination(text)
+        assert is_junk is True
+        assert "low_uniqueness" in reason or "repeat" in reason
+
+    def test_substantive_chunk_with_some_repetition_passes(self):
+        # Real speech can have "yeah yeah" or "you know you know" — should NOT trip the filter
+        text = (
+            "Yeah yeah I think the calibration is the part we still need to validate. "
+            "You know I'm just going to push the PR for review and we can iterate on it. "
+            "I think the main risk is the timing on the launch."
+        )
+        is_junk, _ = is_hallucination(text)
+        assert is_junk is False
+
+    def test_youtube_intro_passes(self):
+        # The Mitchell Hashimoto Code Report YouTube clip — long, real content,
+        # no repeats. Even though it's off-topic, it's not a hallucination.
+        text = (
+            "It's 10pm. Do you know where your children are? I don't know where mine "
+            "are because I'm too busy working on pushing commit, final final v2 actual "
+            "fix to GitHub. Unfortunately, if you're one of the 100 million plus "
+            "developers who use GitHub, you may have encountered a message like this."
+        )
+        is_junk, _ = is_hallucination(text)
+        assert is_junk is False
