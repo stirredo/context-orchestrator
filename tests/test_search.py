@@ -113,3 +113,59 @@ class TestMMR:
         vs.add("doc1", "Single document in the corpus", {"type": "x"})
         results = vs.search("document", n_results=5, mmr=True)
         assert len(results) == 1
+
+
+class TestHybridSearch:
+    def test_hybrid_finds_proper_noun_via_bm25(self, vs):
+        # Embedding alone struggles with rare proper nouns. BM25 catches them.
+        vs.add("a", "Discussion about deployment infrastructure and CI pipelines",
+               {"file": "a"})
+        vs.add("b", "Notes on Megatune integration with the conversion model",
+               {"file": "b"})
+        vs.add("c", "Generic talk about machine learning model training",
+               {"file": "c"})
+
+        results = vs.search("Megatune", n_results=3, hybrid=True)
+        ids = [r["id"] for r in results]
+        # The document literally containing "Megatune" should rank first.
+        assert ids[0] == "b"
+
+    def test_hybrid_combines_dense_and_keyword(self, vs):
+        # 'b' has the literal keyword; 'c' is semantically related; 'a' is unrelated.
+        vs.add("a", "Cooking recipes for pasta dishes", {"file": "a"})
+        vs.add("b", "PostgreSQL replication failover policy details", {"file": "b"})
+        vs.add("c", "Database high-availability architecture overview", {"file": "c"})
+
+        results = vs.search("PostgreSQL replication", n_results=3, hybrid=True)
+        ids = [r["id"] for r in results]
+        # Both b (keyword) and c (semantic) should rank above a (unrelated)
+        assert "a" not in ids[:2] or len(ids) == 1
+
+    def test_hybrid_with_mmr(self, vs):
+        # 5 PG docs + 1 unrelated. Hybrid+MMR should still produce results.
+        for i in range(5):
+            vs.add(f"pg{i}", f"PostgreSQL sharding strategy variant {i}", {"file": "pg"})
+        vs.add("k1", "Kafka topic compaction policies", {"file": "k"})
+
+        results = vs.search("PostgreSQL", n_results=3, hybrid=True, mmr=True)
+        assert len(results) == 3
+        # Results should not include MMR-internal fields
+        assert "embedding" not in results[0]
+        assert "sim_to_query" not in results[0]
+
+    def test_hybrid_handles_empty_corpus(self, vs):
+        results = vs.search("anything", n_results=5, hybrid=True)
+        assert results == []
+
+    def test_invalidate_bm25_rebuilds(self, vs):
+        vs.add("doc1", "Original content here", {"type": "x"})
+        # First hybrid query builds the index
+        results1 = vs.search("content", n_results=3, hybrid=True)
+        assert len(results1) >= 1
+        # Add a new doc and invalidate
+        vs.add("doc2", "Megatune-specific content for the index", {"type": "x"})
+        vs.invalidate_bm25()
+        # New doc should now be findable via hybrid (BM25 picks up "Megatune")
+        results2 = vs.search("Megatune", n_results=3, hybrid=True)
+        ids = [r["id"] for r in results2]
+        assert "doc2" in ids
