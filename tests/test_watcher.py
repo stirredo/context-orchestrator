@@ -61,14 +61,16 @@ def test_scan_skips_unchanged_file(vs, watch_dir, state_file):
 
 def test_scan_reindexes_modified_file_and_drops_old_chunks(vs, watch_dir, state_file):
     f = watch_dir / "meeting-3.md"
-    _write_old(f, "word " * 1200, age_seconds=60.0)
+    # Distinct tokens — same-word filler would correctly be dropped by the
+    # hallucination filter as low-entropy noise.
+    _write_old(f, " ".join(f"token{i}" for i in range(1200)), age_seconds=60.0)
 
     state = watcher.load_state(state_file)
     watcher.scan_once(vs, watch_dir, state)
     chunks_v1 = vs.count()
     assert chunks_v1 >= 3
 
-    _write_old(f, "single short chunk now", age_seconds=60.0)
+    _write_old(f, "Sprint planning notes covering the database migration timeline.", age_seconds=60.0)
 
     indexed = watcher.scan_once(vs, watch_dir, state)
     assert indexed == [f]
