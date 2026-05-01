@@ -36,6 +36,7 @@ CORRECTIONS_SRC_CANDIDATES=(
 
 WATCHER_PLIST="$HOME/Library/LaunchAgents/com.stirredo.transcript-watcher.plist"
 MEETING_PLIST="$HOME/Library/LaunchAgents/com.stirredo.meeting-capture.plist"
+CHROMA_PLIST="$HOME/Library/LaunchAgents/com.stirredo.context-orchestrator-chroma.plist"
 
 CHROMA_DIR="$HOME/.context-orchestrator/chroma"
 WATCHER_STATE="$HOME/.context-orchestrator/watcher_state.json"
@@ -250,9 +251,12 @@ if [ "$ENABLE_EMBED" = 1 ] || [ "$ENABLE_RERANK" = 1 ]; then
 fi
 
 # --- chroma wipe (only if switching embedding dim) ---
+# Note: we run the daemon health-check even if $CHROMA_DIR doesn't exist —
+# the daemon may be running with stale FDs from a prior aborted activation
+# that moved the dir aside. We can't tell from the filesystem alone.
 echo ""
 echo "[5/7] Chroma collection check..."
-if [ "$ENABLE_EMBED" = 1 ] && [ -d "$CHROMA_DIR" ]; then
+if [ "$ENABLE_EMBED" = 1 ]; then
     # Detect current embedding dim by querying the daemon
     CURRENT_DIM=$("$CONTEXT_ORCH/.venv/bin/python" -c "
 import chromadb, sys
@@ -270,8 +274,21 @@ except Exception:
 " 2>/dev/null | tail -1)
     if [ "$CURRENT_DIM" = "3072" ]; then
         ok "Chroma already on Gemini embeddings (3072d) — no reindex needed"
-    elif [ "$CURRENT_DIM" = "-1" ] || [ "$CURRENT_DIM" = "0" ]; then
-        ok "Chroma empty/unreachable — fresh state"
+    elif [ "$CURRENT_DIM" = "0" ]; then
+        ok "Chroma empty — fresh state, no reindex needed"
+    elif [ "$CURRENT_DIM" = "-1" ]; then
+        # Daemon unreachable. Could be down, or wedged with stale FDs from
+        # a prior aborted run that moved the data dir out from under it.
+        # Bounce it so it comes up clean.
+        warn "Chroma daemon unreachable — restarting to clear any stale state"
+        if [ -f "$CHROMA_PLIST" ]; then
+            run "launchctl unload \"$CHROMA_PLIST\" 2>/dev/null || true"
+            run "launchctl load \"$CHROMA_PLIST\""
+            ok "chroma daemon restarted"
+            sleep 3
+        else
+            warn "chroma plist not found at $CHROMA_PLIST — daemon may need manual restart"
+        fi
     else
         BACKUP="${CHROMA_DIR}.bak-$(date +%Y%m%d-%H%M%S)"
         warn "Chroma is ${CURRENT_DIM}d — Gemini needs 3072d. Will backup + reindex."
@@ -279,9 +296,21 @@ except Exception:
         run "mv \"$CHROMA_DIR\" \"$BACKUP\""
         run "rm -f \"$WATCHER_STATE\""
         ok "backed up old chroma to $BACKUP"
+        # The chroma daemon caches collection metadata (incl. embedding-fn name)
+        # in memory. After wiping the on-disk dir we must restart it, otherwise
+        # the watcher's first add() conflicts with the stale persisted "default"
+        # embedding-fn and crash-loops.
+        if [ -f "$CHROMA_PLIST" ]; then
+            run "launchctl unload \"$CHROMA_PLIST\" 2>/dev/null || true"
+            run "launchctl load \"$CHROMA_PLIST\""
+            ok "chroma daemon restarted with fresh data dir"
+            sleep 3
+        else
+            warn "chroma plist not found at $CHROMA_PLIST — daemon may need manual restart"
+        fi
     fi
 else
-    ok "skipped (--no-gemini-embed or no existing chroma dir)"
+    ok "skipped (--no-gemini-embed)"
 fi
 
 # --- restart daemons ---

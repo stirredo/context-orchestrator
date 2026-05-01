@@ -139,9 +139,12 @@ def _build_gemini_embedding_function(model_name: str):
         )
     client = genai.Client(api_key=api_key)
 
+    import numpy as np
+
     class _GeminiEF:
-        """Chroma EmbeddingFunction protocol: a callable taking list[str]
-        and returning list[list[float]], plus a name() method."""
+        """Chroma EmbeddingFunction protocol: a callable taking list[str] and
+        returning a list of np.ndarray (one per input). Chroma's HTTP client
+        calls .tolist() on each, so plain Python lists won't work."""
         def name(self) -> str:
             return f"gemini-{model_name}"
 
@@ -151,7 +154,7 @@ def _build_gemini_embedding_function(model_name: str):
                 contents=input,
                 config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
             )
-            return [e.values for e in result.embeddings]
+            return [np.asarray(e.values, dtype=np.float32) for e in result.embeddings]
 
     return _GeminiEF()
 
