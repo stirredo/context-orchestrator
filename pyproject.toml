@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "mcp[cli]>=1.0.0",
     "chromadb>=0.5.0",
+    "rank-bm25>=0.2.2",
 ]
 
 [project.scripts]
@@ -15,6 +16,26 @@ context-orchestrator-chroma = "context_orchestrator.chroma_daemon:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+# Optional embedding upgrades. Install with:
+#   pip install -e '.[embeddings]'
+# Then set CO_EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5 (or any
+# sentence-transformers model name). Note: switching the model
+# invalidates existing vectors — wipe the collection / chroma path
+# first so HNSW dimensions match.
+embeddings = [
+    "sentence-transformers>=2.0",
+    "einops>=0.6",  # required by nomic-embed-text-v1.5
+]
+# Gemini embeddings + reranker via Google's API. Install with:
+#   pip install -e '.[embeddings-gemini]'
+# Then set:
+#   CO_EMBEDDING_MODEL=gemini-embedding-001    (3072d, top-MTEB)
+#   CO_RERANK_MODEL=gemini-flash-latest        (LLM rerank — see search.py)
+# API key is read from $GOOGLE_API_KEY, $GEMINI_API_KEY, or
+# ~/.config/google/key (mode 600).
+embeddings-gemini = [
+    "google-genai>=0.3",
+]
 
 [build-system]
 requires = ["hatchling"]
