@@ -25,8 +25,10 @@
 set -e
 
 # --- paths ---
-CONTEXT_ORCH="$HOME/tasks/context-orchestrator"
-MEETING_CAPTURE="$HOME/src/meeting-capture"
+# Override via env vars when checkout dirs differ from the defaults below
+# (e.g. CONTEXT_ORCH=$HOME/tasks/vector_databases_experiments).
+CONTEXT_ORCH="${CONTEXT_ORCH:-$HOME/tasks/context-orchestrator}"
+MEETING_CAPTURE="${MEETING_CAPTURE:-$HOME/src/meeting-capture}"
 GEMINI_KEY_FILE="$HOME/.config/google/key"
 CONFIG_DIR="$HOME/.config/context-orchestrator"
 CORRECTIONS_DST="$CONFIG_DIR/corrections.json"
@@ -201,7 +203,33 @@ fi
 
 # --- env vars in launchd plists ---
 echo ""
-echo "[4/7] Wiring env vars into launchd plists..."
+echo "[4/7] Wiring env vars into launchd plists + MCP config..."
+
+set_mcp_env_var() {
+    local mcp_json="$1" key="$2" value="$3"
+    if [ ! -f "$mcp_json" ]; then
+        warn "  $mcp_json missing — skipping MCP env wiring"
+        return
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        echo "  [dry-run] would set $key=$value in $mcp_json (context-orchestrator.env)"
+        return
+    fi
+    "$CONTEXT_ORCH/.venv/bin/python" - "$mcp_json" "$key" "$value" <<'PY'
+import json, sys
+path, key, value = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    cfg = json.load(f)
+env = cfg.setdefault("mcpServers", {}).setdefault("context-orchestrator", {}).setdefault("env", {})
+if env.get(key) == value:
+    sys.exit(0)
+env[key] = value
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PY
+    echo "  > set $key in $mcp_json (context-orchestrator.env)"
+}
 
 set_plist_env_var() {
     local plist="$1" key="$2" value="$3"
@@ -244,10 +272,21 @@ fi
 if [ "$ENABLE_EMBED" = 1 ]; then
     set_plist_env_var "$WATCHER_PLIST" CO_EMBEDDING_MODEL gemini-embedding-001
 fi
-# rerank model is read by the MCP server, not the watcher daemon — the MCP
-# server inherits from Claude Code's environment. Tell user to set in shell.
 if [ "$ENABLE_EMBED" = 1 ] || [ "$ENABLE_RERANK" = 1 ]; then
     [ -n "$API_KEY" ] && set_plist_env_var "$WATCHER_PLIST" GOOGLE_API_KEY "$API_KEY"
+fi
+
+# MCP server: spawned by Claude Code from .mcp.json, does NOT inherit shell
+# env. If we don't wire CO_EMBEDDING_MODEL into the json's env block, the
+# server falls back to local 384d embeddings and crashes on first upsert
+# against the 3072d Gemini collection. API key is read from
+# ~/.config/google/key by the server, so no secret goes into .mcp.json.
+MCP_JSON="$CONTEXT_ORCH/.mcp.json"
+if [ "$ENABLE_EMBED" = 1 ]; then
+    set_mcp_env_var "$MCP_JSON" CO_EMBEDDING_MODEL gemini-embedding-001
+fi
+if [ "$ENABLE_RERANK" = 1 ]; then
+    set_mcp_env_var "$MCP_JSON" CO_RERANK_MODEL gemini-flash-latest
 fi
 
 # --- chroma wipe (only if switching embedding dim) ---

@@ -4,7 +4,9 @@
       "command": ".venv/bin/python",
       "args": ["-m", "context_orchestrator.server"],
       "env": {
-        "PYTHONPATH": "src"
+        "PYTHONPATH": "src",
+        "CO_EMBEDDING_MODEL": "gemini-embedding-001",
+        "CO_RERANK_MODEL": "gemini-flash-latest"
       }
     }
   }

@@ -82,16 +82,42 @@ def _resolve_gemini_api_key() -> Optional[str]:
 def _build_embedding_function():
     """Construct a Chroma EmbeddingFunction for the user-configured model.
 
-    Returns None when no override is set (Chroma falls back to its built-in
-    default, all-MiniLM-L6-v2). Dispatches by model-name prefix:
-      - "gemini-*" → hosted Gemini embedder (requires `[embeddings-gemini]`)
-      - everything else → local SentenceTransformer (requires `[embeddings]`)
+    Resolution order:
+      1. CO_EMBEDDING_MODEL set to a model name → use it.
+      2. CO_EMBEDDING_MODEL set to "off" / "none" / "default" → force the
+         local Chroma default (returns None).
+      3. CO_EMBEDDING_MODEL unset → AUTO-DETECT: if a Gemini API key is
+         resolvable AND google-genai is importable, default to
+         gemini-embedding-001. Otherwise fall back to local default.
 
-    Raises a clear error if the requested backend's optional extra isn't
-    installed or if Gemini credentials are missing.
+    The auto-detect is what lets the watcher (with explicit env in its
+    plist) and the MCP server (which inherits whatever the spawning client
+    happens to pass) converge to the same EF without manual sync — as
+    long as the key file is present, both will pick Gemini. Setting
+    CO_EMBEDDING_MODEL=off explicitly opts out.
     """
     model_name = os.environ.get(EMBEDDING_MODEL_ENV)
+    if model_name and model_name.lower() in ("off", "none", "default", "local"):
+        logger.info(f"{EMBEDDING_MODEL_ENV}={model_name}: forcing chroma default (local 384d)")
+        return None
     if not model_name:
+        # Auto-detect Gemini availability
+        try:
+            import google.genai  # noqa: F401
+            if _resolve_gemini_api_key():
+                model_name = "gemini-embedding-001"
+                logger.info(
+                    f"{EMBEDDING_MODEL_ENV} unset; auto-detected Gemini "
+                    f"(key present + google-genai installed) → {model_name}. "
+                    f"Set {EMBEDDING_MODEL_ENV}=off to force local default."
+                )
+        except ImportError:
+            pass
+    if not model_name:
+        logger.info(
+            f"{EMBEDDING_MODEL_ENV} unset and Gemini unavailable; "
+            "using chroma default (local 384d)"
+        )
         return None
     if model_name.startswith("gemini-"):
         return _build_gemini_embedding_function(model_name)
@@ -114,12 +140,9 @@ def _build_embedding_function():
 def _build_gemini_embedding_function(model_name: str):
     """Construct a Chroma-compatible EmbeddingFunction backed by Gemini.
 
-    Uses task_type=RETRIEVAL_DOCUMENT for both indexing and queries (Chroma
-    doesn't distinguish in the EmbeddingFunction API, and document-typed
-    embeddings still match queries reasonably for RAG-style retrieval).
-
-    For asymmetric retrieval where the cost of separate query embeddings
-    matters, callers can construct two collections.
+    Uses asymmetric task_types: RETRIEVAL_DOCUMENT for indexing,
+    RETRIEVAL_QUERY for query-time. Gemini's embedding API benefits
+    measurably from this separation.
     """
     try:
         from google import genai
@@ -141,20 +164,30 @@ def _build_gemini_embedding_function(model_name: str):
 
     import numpy as np
 
+    def _embed(texts, task_type: str):
+        result = client.models.embed_content(
+            model=model_name,
+            contents=texts,
+            config=types.EmbedContentConfig(task_type=task_type),
+        )
+        return [np.asarray(e.values, dtype=np.float32) for e in result.embeddings]
+
     class _GeminiEF:
-        """Chroma EmbeddingFunction protocol: a callable taking list[str] and
-        returning a list of np.ndarray (one per input). Chroma's HTTP client
-        calls .tolist() on each, so plain Python lists won't work."""
+        """Chroma EmbeddingFunction protocol. Newer Chroma (>=1.x) calls
+        embed_documents at insert and embed_query at query time; older
+        versions just call __call__. Implement all three for compatibility."""
         def name(self) -> str:
             return f"gemini-{model_name}"
 
         def __call__(self, input):
-            result = client.models.embed_content(
-                model=model_name,
-                contents=input,
-                config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
-            )
-            return [np.asarray(e.values, dtype=np.float32) for e in result.embeddings]
+            return _embed(input, "RETRIEVAL_DOCUMENT")
+
+        def embed_documents(self, input):
+            return _embed(input, "RETRIEVAL_DOCUMENT")
+
+        def embed_query(self, input):
+            texts = input if isinstance(input, list) else [input]
+            return _embed(texts, "RETRIEVAL_QUERY")
 
     return _GeminiEF()
 
@@ -315,6 +348,44 @@ class VectorSearch:
         self._bm25_ids: list[str] = []
         target = str(self.chroma_path) if self.chroma_path else f"http://{self.host}:{self.port}"
         logger.info(f"Vector search initialized at {target} ({self.collection.count()} docs)")
+        self._verify_embedding_dim()
+
+    def _verify_embedding_dim(self) -> None:
+        """Compare the configured EF's output dim against the dim of vectors
+        already stored in the collection. Mismatches are silent footguns:
+        upserts go through OK but every query returns a 400. Surface it
+        loudly at startup with the exact remediation steps.
+        """
+        if self.collection.count() == 0:
+            return  # Empty collection takes whatever the EF produces.
+        try:
+            stored = self.collection.get(limit=1, include=["embeddings"])
+            embs = stored.get("embeddings")
+            if embs is None or len(embs) == 0:
+                return
+            stored_dim = len(embs[0])
+        except Exception as e:
+            logger.warning(f"Could not read collection dim for verification: {e}")
+            return
+        ef = self.collection._embedding_function
+        try:
+            probe = ef(["dim probe"])
+            ef_dim = len(probe[0])
+        except Exception as e:
+            logger.warning(f"Could not probe EF dim for verification: {e}")
+            return
+        if ef_dim != stored_dim:
+            ef_name = type(ef).__name__
+            logger.error(
+                f"EMBEDDING DIM MISMATCH: collection has {stored_dim}d vectors "
+                f"but the configured embedding function ({ef_name}) produces "
+                f"{ef_dim}d. Every query and most upserts will 400. "
+                f"Fix one of: (a) set CO_EMBEDDING_MODEL to match the model "
+                f"that built the collection ({stored_dim}d), (b) re-run "
+                f"enable-gemini-pipeline.sh to wipe + reindex at the new "
+                f"dim, or (c) wipe ~/.context-orchestrator/chroma and let "
+                f"the watcher rebuild from disk."
+            )
 
     def _connect(self) -> None:
         if self.chroma_path is not None:

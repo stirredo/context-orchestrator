@@ -56,13 +56,36 @@ vs = VectorSearch(chroma_path=Path(chroma_path) if chroma_path else None)
 
 
 def _sync_index():
-    """Ensure all existing data is indexed. Runs in background on startup."""
+    """Ensure all existing data is indexed. Runs in background on startup.
+
+    Fast-path: if chroma already has at least one entry for every
+    repo_knowledge id and every source id, skip the whole sync. This
+    avoids re-embedding on every startup and — more importantly —
+    eliminates the timing race where the background sync thread is mid-
+    Gemini-call when an MCP tool request lands and the stdio pipe drops.
+    """
+    existing_ids = set(vs.collection.get(include=[])["ids"])
+    rk_ids = {f"repo_knowledge:{r[0]}" for r in db.conn.execute(
+        "SELECT id FROM repo_knowledge").fetchall()}
+    # Only text sources get indexed as `source:<id>`; repo/url types are
+    # never embedded, so we don't expect them in chroma.
+    src_ids = {f"source:{r[0]}" for r in db.conn.execute(
+        "SELECT id FROM sources WHERE source_type='text'").fetchall()}
+    notes_ids = {f"source_notes:{r[0]}" for r in db.conn.execute(
+        "SELECT id FROM sources WHERE notes != ''").fetchall()}
+    expected = rk_ids | src_ids | notes_ids
+    if expected.issubset(existing_ids):
+        logger.info("Vector index already in sync — skipping startup reindex")
+        return
+
     indexed = 0
 
     # Index repo knowledge
     for row in db.conn.execute("SELECT * FROM repo_knowledge").fetchall():
         row = dict(row)
         doc_id = f"repo_knowledge:{row['id']}"
+        if doc_id in existing_ids:
+            continue
         vs.add(doc_id, row["insight"], {
             "type": "repo_knowledge",
             "repo_url": row["repo_url"],
@@ -76,13 +99,14 @@ def _sync_index():
         row = dict(row)
         if row["source_type"] == "text":
             doc_id = f"source:{row['id']}"
-            vs.add(doc_id, row["reference"], {
-                "type": "source",
-                "source_type": row["source_type"],
-                "task_name": row["task_name"],
-                "project": row["project"],
-            })
-            indexed += 1
+            if doc_id not in existing_ids:
+                vs.add(doc_id, row["reference"], {
+                    "type": "source",
+                    "source_type": row["source_type"],
+                    "task_name": row["task_name"],
+                    "project": row["project"],
+                })
+                indexed += 1
         elif row["source_type"] == "file":
             num_chunks = index_file_content(
                 vs, row["id"], row["reference"],
@@ -92,6 +116,8 @@ def _sync_index():
             indexed += num_chunks
         if row["notes"]:
             doc_id = f"source_notes:{row['id']}"
+            if doc_id in existing_ids:
+                continue
             vs.add(doc_id, row["notes"], {
                 "type": "source_notes",
                 "source_type": row["source_type"],
