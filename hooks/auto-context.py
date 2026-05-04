@@ -119,7 +119,27 @@ except Exception as e:
         return ""
 
 
+HEARTBEAT_FILE = Path.home() / ".context-orchestrator" / "auto-context-heartbeat.json"
+
+
+def _write_heartbeat(injected_chars: int, latency_ms: int, prompt_len: int):
+    """Drop a single-line JSON file the dashboard reads to show last fire."""
+    try:
+        HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HEARTBEAT_FILE.write_text(json.dumps({
+            "ts": __import__("time").time(),
+            "iso": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+            "injected_chars": injected_chars,
+            "latency_ms": latency_ms,
+            "prompt_len": prompt_len,
+        }))
+    except Exception:
+        pass  # heartbeat is best-effort; don't break the hook
+
+
 def main():
+    import time as _t
+    _start = _t.time()
     try:
         payload = json.loads(sys.stdin.read())
     except Exception:
@@ -154,6 +174,11 @@ def main():
         "ignore if not.\n\n" + "\n\n".join(sections)
     )
     print(json.dumps({"additionalContext": body}))
+    _write_heartbeat(
+        injected_chars=len(body),
+        latency_ms=int((_t.time() - _start) * 1000),
+        prompt_len=len(prompt),
+    )
 
 
 if __name__ == "__main__":
