@@ -1,5 +1,7 @@
 # context-orchestrator
 
+> Part of **Contorch** — the persistent context layer for Claude Code. Captures meetings, indexes everything, carries the torch from one Claude session to the next.
+
 MCP server that gives Claude persistent memory of your tasks, sources, and repo knowledge across sessions, with a vector index over everything you've captured.
 
 Pairs with [meeting-capture](https://github.com/stirredo/meeting-capture) — that daemon writes meeting transcripts to `~/transcripts/`, and this project's `transcript-watcher` indexes them automatically. Either project runs without the other.

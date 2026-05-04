@@ -49,7 +49,7 @@ banner() {
     cat <<EOF
 
 ${BOLD}${CYAN}╭──────────────────────────────────────────────────────╮
-│        meeting + context + dashboard pipeline        │
+│   ${YELLOW}△${CYAN} ${BOLD}Contorch${RESET}${CYAN} — persistent context layer for Claude   │
 │        bootstrap installer                            │
 ╰──────────────────────────────────────────────────────╯${RESET}
 
