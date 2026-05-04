@@ -12,6 +12,18 @@ Pairs with [meeting-capture](https://github.com/stirredo/meeting-capture) — th
 
 ## Install
 
+### Recommended — full stack, one command
+
+Installs context-orchestrator + [meeting-capture](https://github.com/stirredo/meeting-capture) + [pipeline-monitor](https://github.com/stirredo/pipeline-monitor) + the auto-context Claude Code hook + (optional) Gemini activation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/stirredo/context-orchestrator/main/bootstrap.sh | bash
+```
+
+The script is idempotent (safe to re-run), installs missing prereqs via Homebrew, prompts for a Gemini API key when it needs one (skip with empty input to stay all-local), and finishes with a clear punch-list of the few things macOS requires you to click yourself: restarting Claude Code so it re-reads `~/.claude/settings.json`, and granting Microphone + Screen Recording permissions in System Settings.
+
+### Just this repo
+
 ```bash
 git clone https://github.com/stirredo/context-orchestrator.git
 cd context-orchestrator
@@ -20,7 +32,7 @@ cd context-orchestrator
 
 `setup.sh` checks prerequisites, creates a Python venv, registers the MCP server with Claude Code (via `claude mcp add`), appends standard usage instructions to `~/.claude/CLAUDE.md`, installs the chroma HTTP server launchd agent (with a one-time backup of any existing chroma data), and installs the `transcript-watcher` launchd auto-start agent.
 
-After install, restart Claude Code so the new MCP server is loaded.
+After either install path, restart Claude Code so the new MCP server is loaded.
 
 To verify:
 
