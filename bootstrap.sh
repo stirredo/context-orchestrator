@@ -267,6 +267,36 @@ setup_pipeline_monitor() {
     fi
 }
 
+# ============================================================ TCC permissions
+
+open_tcc_panes() {
+    step "Open System Settings → grant Microphone + Screen Recording"
+    info "The daemons just started via launchd; they've already tried to access"
+    info "the mic and the system-audio capture API. Their entries are now in the"
+    info "Privacy panes — toggled OFF. Just flip them ON."
+    info ""
+    info "Opening Microphone pane…"
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone" 2>/dev/null || true
+    sleep 1
+    info "Opening Screen & System Audio Recording pane…"
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture" 2>/dev/null || true
+    info ""
+    info "Look for entries named ${BOLD}sysaudio${RESET} (Screen Recording) and"
+    info "${BOLD}meeting-capture${RESET} or ${BOLD}python3${RESET} (Microphone). Toggle each ON."
+    info ""
+    if [ -t 0 ] || [ -e /dev/tty ]; then
+        ask "Press Enter once you've toggled both ON (or Ctrl-C to skip):"
+        if [ -t 0 ]; then read -r _; else read -r _ < /dev/tty; fi
+    else
+        warn "non-interactive shell — skipping the wait. Toggle them when you can."
+    fi
+    # After granting, bounce the daemons so they pick up the new permissions.
+    info "Restarting daemons so they pick up the new grants…"
+    for label in com.stirredo.meeting-capture com.stirredo.transcript-watcher; do
+        launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null && ok "kicked $label" || true
+    done
+}
+
 # ============================================================ final report
 
 final_report() {
@@ -281,22 +311,15 @@ ${BOLD}Installed at:${RESET}
   $MEETING_CAPTURE_DIR
   $PIPELINE_MONITOR_DIR
 
-${BOLD}${YELLOW}Manual steps remaining:${RESET}
+${BOLD}${YELLOW}One thing left for you:${RESET}
 
-  ${CYAN}1.${RESET} ${BOLD}Restart Claude Code${RESET}
-       Quit and relaunch the Claude Code app so it picks up the new
-       MCP server config + UserPromptSubmit hook from ~/.claude/settings.json.
+  ${CYAN}▶${RESET} ${BOLD}Restart Claude Code${RESET}
+       Quit and relaunch the app so it picks up the new MCP server +
+       UserPromptSubmit hook from ~/.claude/settings.json.
 
-  ${CYAN}2.${RESET} ${BOLD}Grant macOS permissions${RESET}
-       Open System Settings → Privacy & Security:
-         • Microphone           — allow Terminal (or whichever shell launches the daemon)
-         • Screen & System Audio Recording
-                                — add $MEETING_CAPTURE_DIR/bin/sysaudio
-       The first time you record, macOS will pop dialogs — accept them.
-
-  ${CYAN}3.${RESET} ${BOLD}Verify${RESET}
-       Click the ○ icon in your menu bar.
-       Click ${BOLD}"Run end-to-end smoke test"${RESET} — should show ✓ in ~1.5s.
+${BOLD}Verify everything works:${RESET}
+  Click the ○ icon in your menu bar → ${BOLD}"Run end-to-end smoke test"${RESET}.
+  Should show ✓ in ~1.5s.
 
 ${BOLD}Useful one-liners:${RESET}
   launchctl list | grep com.stirredo            ${DIM}# all daemons${RESET}
@@ -326,6 +349,8 @@ main() {
     setup_gemini
     setup_auto_context_hook
     setup_pipeline_monitor
+
+    open_tcc_panes
 
     final_report
 }
