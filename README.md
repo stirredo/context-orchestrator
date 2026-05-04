@@ -1,3 +1,7 @@
+<p align="left">
+  <img src="assets/contorch-orange.png" width="96" alt="Contorch logo">
+</p>
+
 # context-orchestrator
 
 > Part of **Contorch** — the persistent context layer for Claude Code. Captures meetings, indexes everything, carries the torch from one Claude session to the next.
