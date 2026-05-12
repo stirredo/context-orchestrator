@@ -24,7 +24,20 @@ STATE_DIR = Path.home() / ".context-orchestrator"
 STATE_FILE = STATE_DIR / "watcher_state.json"
 LOG_FILE = STATE_DIR / "watcher.log"
 DEFAULT_INTERVAL = 5.0
-SETTLE_SECONDS = 2.0
+# How long a file must be quiet (no mtime advance) before we re-index it.
+#
+# meeting-capture appends a new chunk to its active transcript every ~10-20s
+# during a live meeting. With a small settle window the watcher catches the
+# file in its short quiet stretch after every append and re-chunks + re-embeds
+# the ENTIRE file each time, producing O(N²) Gemini embedding calls in the
+# length of the meeting (verified 5/8: one 2.5h meeting re-indexed 457 times,
+# 8175 embed calls, ~6M tokens — hit 88% of the Embedding-1 TPM cap).
+#
+# 60s is comfortably longer than the longest natural gap between meeting-
+# capture chunks, so live transcripts wait until the meeting actually ends.
+# Tradeoff: ~60s delay between meeting-end and the transcript being
+# searchable. Acceptable for this workload.
+SETTLE_SECONDS = 60.0
 
 LAUNCHD_LABEL = "com.stirredo.transcript-watcher"
 LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
