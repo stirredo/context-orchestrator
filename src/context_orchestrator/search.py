@@ -391,7 +391,7 @@ class VectorSearch:
         if self.chroma_path is not None:
             self.client = chromadb.PersistentClient(path=str(self.chroma_path))
         else:
-            self.client = chromadb.HttpClient(host=self.host, port=self.port)
+            self.client = self._http_client_with_retry()
         kwargs: dict = {
             "name": "context",
             "metadata": {"hnsw:space": "cosine"},
@@ -400,6 +400,39 @@ class VectorSearch:
         if ef is not None:
             kwargs["embedding_function"] = ef
         self.collection = self.client.get_or_create_collection(**kwargs)
+
+    def _http_client_with_retry(self):
+        """Retry chromadb.HttpClient with exponential backoff.
+
+        At cold-boot or fresh-Claude-Code launch, the chroma launchd daemon
+        is still binding port 8765 (~20-30s after login) while the MCP
+        server is already trying to connect. Without a retry we crash with
+        "Connection refused" on the very first attempt and the MCP server
+        stays dead until the user manually /mcp reconnects.
+
+        Retry sleeps: 0.5, 1, 2, 4, 8, 15 — total ~30s, which covers a
+        typical chroma cold-start window. Each individual attempt is fast
+        because the failure mode is a TCP refused, not a hang.
+        """
+        import time as _t
+        last_err: Exception | None = None
+        for delay in (0.5, 1.0, 2.0, 4.0, 8.0, 15.0):
+            try:
+                return chromadb.HttpClient(host=self.host, port=self.port)
+            except Exception as e:
+                # chromadb raises ValueError for "Could not connect" and
+                # httpx propagates ConnectError; either means the daemon
+                # isn't ready yet. Anything else (auth, schema, etc.) we
+                # want to surface immediately.
+                msg = str(e).lower()
+                if "could not connect" not in msg and "connection refused" not in msg:
+                    raise
+                last_err = e
+                _t.sleep(delay)
+        raise RuntimeError(
+            f"chroma daemon at {self.host}:{self.port} did not become reachable "
+            f"after ~30s. Is `context-orchestrator-chroma status` healthy?"
+        ) from last_err
 
     def reload(self) -> None:
         """Reconnect to disk so writes from other processes (e.g. the watcher) become visible."""
