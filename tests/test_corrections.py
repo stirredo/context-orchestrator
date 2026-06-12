@@ -13,25 +13,25 @@ from context_orchestrator.corrections import (
 
 class TestApply:
     def test_basic_replacement(self):
-        corrections = {"macatune": "Megatune", "gung": "Gang"}
-        text = "We discussed macatune integration with Gung today."
+        corrections = {"oldterm": "NewTerm", "oldphrase": "NewPhrase"}
+        text = "We discussed oldterm integration with OldPhrase today."
         out = apply(text, corrections)
-        assert "Megatune" in out
-        assert "Gang" in out
-        assert "macatune" not in out
-        assert "Gung" not in out
+        assert "NewTerm" in out
+        assert "NewPhrase" in out
+        assert "oldterm" not in out
+        assert "OldPhrase" not in out
 
     def test_case_insensitive_match_preserves_replacement_case(self):
-        corrections = {"macatune": "Megatune"}
-        out = apply("MACATUNE and Macatune and macatune are all the same.", corrections)
-        # All three occurrences become "Megatune" (replacement case wins)
-        assert out.count("Megatune") == 3
+        corrections = {"oldterm": "NewTerm"}
+        out = apply("OLDTERM and OldTerm and oldterm are all the same.", corrections)
+        # All three occurrences become "NewTerm" (replacement case wins)
+        assert out.count("NewTerm") == 3
 
     def test_word_boundary(self):
-        # "macatune" should NOT match inside "macatuneXYZ" — that's a different word
-        corrections = {"macatune": "Megatune"}
-        out = apply("This is unrelatedmacatune word here.", corrections)
-        assert "Megatune" not in out
+        # "oldterm" should NOT match inside "oldtermXYZ" — that's a different word
+        corrections = {"oldterm": "NewTerm"}
+        out = apply("This is unrelatedoldterm word here.", corrections)
+        assert "NewTerm" not in out
 
     def test_empty_corrections_is_noop(self):
         original = "Some text that should not change."
@@ -59,34 +59,34 @@ class TestLoadCorrections:
         f = tmp_path / "c.json"
         f.write_text(json.dumps({
             "_meta": {"source": "test"},
-            "corrections": {"macatune": "Megatune", "gung": "Gang"},
+            "corrections": {"oldterm": "NewTerm", "oldphrase": "NewPhrase"},
         }))
         monkeypatch.setenv("CO_CORRECTIONS_FILE", str(f))
         c = load_corrections()
-        assert c["macatune"] == "Megatune"
-        assert c["gung"] == "Gang"
+        assert c["oldterm"] == "NewTerm"
+        assert c["oldphrase"] == "NewPhrase"
 
     def test_load_yaml_simple(self, tmp_path, monkeypatch):
         f = tmp_path / "c.yaml"
         f.write_text(
             "# Optional preamble\n"
             "corrections:\n"
-            "  macatune: Megatune\n"
-            "  gung: Gang\n"
+            "  oldterm: NewTerm\n"
+            "  oldphrase: NewPhrase\n"
             "  radius: Redis  # comment after value\n"
         )
         monkeypatch.setenv("CO_CORRECTIONS_FILE", str(f))
         c = load_corrections()
-        assert c["macatune"] == "Megatune"
+        assert c["oldterm"] == "NewTerm"
         assert c["radius"] == "Redis"
 
     def test_keys_lowercased(self, tmp_path, monkeypatch):
         f = tmp_path / "c.json"
-        f.write_text(json.dumps({"corrections": {"Macatune": "Megatune"}}))
+        f.write_text(json.dumps({"corrections": {"OldTerm": "NewTerm"}}))
         monkeypatch.setenv("CO_CORRECTIONS_FILE", str(f))
         c = load_corrections()
-        assert "macatune" in c  # key is lowercased
-        assert c["macatune"] == "Megatune"  # value preserved
+        assert "oldterm" in c  # key is lowercased
+        assert c["oldterm"] == "NewTerm"  # value preserved
 
     def test_explicit_path(self, tmp_path):
         f = tmp_path / "c.json"
@@ -100,8 +100,8 @@ class TestBuildRegex:
         assert build_corrections_re({}) is None
 
     def test_compiled_regex_matches(self):
-        pat = build_corrections_re({"macatune": "Megatune"})
+        pat = build_corrections_re({"oldterm": "NewTerm"})
         assert pat is not None
-        m = pat.search("Discussed macatune today.")
+        m = pat.search("Discussed oldterm today.")
         assert m is not None
-        assert m.group(0).lower() == "macatune"
+        assert m.group(0).lower() == "oldterm"

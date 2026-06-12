@@ -11,7 +11,7 @@ def vs():
 
 class TestVectorSearch:
     def test_add_and_search(self, vs):
-        vs.add("doc1", "How to set up Docker for development", {"type": "repo_knowledge"})
+        vs.add("doc1", "How to set up NewPhrase for development", {"type": "repo_knowledge"})
         vs.add("doc2", "Authentication uses JWT with RS256", {"type": "source"})
         vs.add("doc3", "Run tests with pytest -x", {"type": "repo_knowledge"})
 
@@ -120,14 +120,14 @@ class TestHybridSearch:
         # Embedding alone struggles with rare proper nouns. BM25 catches them.
         vs.add("a", "Discussion about deployment infrastructure and CI pipelines",
                {"file": "a"})
-        vs.add("b", "Notes on Megatune integration with the conversion model",
+        vs.add("b", "Notes on NewTerm integration with the conversion model",
                {"file": "b"})
         vs.add("c", "Generic talk about machine learning model training",
                {"file": "c"})
 
-        results = vs.search("Megatune", n_results=3, hybrid=True)
+        results = vs.search("NewTerm", n_results=3, hybrid=True)
         ids = [r["id"] for r in results]
-        # The document literally containing "Megatune" should rank first.
+        # The document literally containing "NewTerm" should rank first.
         assert ids[0] == "b"
 
     def test_hybrid_combines_dense_and_keyword(self, vs):
@@ -163,10 +163,10 @@ class TestHybridSearch:
         results1 = vs.search("content", n_results=3, hybrid=True)
         assert len(results1) >= 1
         # Add a new doc and invalidate
-        vs.add("doc2", "Megatune-specific content for the index", {"type": "x"})
+        vs.add("doc2", "NewTerm-specific content for the index", {"type": "x"})
         vs.invalidate_bm25()
-        # New doc should now be findable via hybrid (BM25 picks up "Megatune")
-        results2 = vs.search("Megatune", n_results=3, hybrid=True)
+        # New doc should now be findable via hybrid (BM25 picks up "NewTerm")
+        results2 = vs.search("NewTerm", n_results=3, hybrid=True)
         ids = [r["id"] for r in results2]
         assert "doc2" in ids
 

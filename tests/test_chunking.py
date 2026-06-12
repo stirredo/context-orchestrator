@@ -45,7 +45,7 @@ class TestChunking:
 class TestHallucinationFilter:
     def test_real_speech_passes(self):
         text = (
-            "So we'll start with the Lyft features. What we're looking at on the left is "
+            "So we'll start with the second part of the demo. What we're looking at on the left is "
             "awareness of the brand and then historic usage if they've actually used this."
         )
         is_junk, _ = is_hallucination(text)

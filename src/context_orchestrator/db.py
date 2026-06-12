@@ -54,6 +54,13 @@ class Database:
 
     def _create_tables(self):
         self.conn.executescript(SCHEMA)
+        # lightweight migrations for existing databases
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(tasks)")}
+        if "dwt_project_id" not in cols:
+            # Deep Work Timer linkage: a contorch task maps to a dwt PROJECT;
+            # granular dwt tasks live under it and get ticked off as work
+            # items complete.
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN dwt_project_id INTEGER")
         self.conn.commit()
 
     # --- Tasks ---
@@ -85,6 +92,13 @@ class Database:
                    GROUP BY t.id ORDER BY t.created_at DESC""",
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def set_dwt_project(self, task_id: int, dwt_project_id: Optional[int]) -> None:
+        self.conn.execute(
+            "UPDATE tasks SET dwt_project_id = ? WHERE id = ?",
+            (dwt_project_id, task_id),
+        )
+        self.conn.commit()
 
     def get_task_by_name(self, name: str, project: Optional[str] = None) -> Optional[dict]:
         if project is not None:

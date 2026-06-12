@@ -17,10 +17,15 @@ Format: a YAML or JSON file at one of:
 Schema (either format):
 
   corrections:
-    macatune: Megatune
-    gung: Gang
-    radius: Redis
+    <misheard form>: <canonical form>
+    <misheard form>: <canonical form>
     # ...
+
+Build your machine's correction list from your own transcripts using
+`context-orchestrator-corrections suggest` (scans recent transcripts for
+likely misspellings and prompts to add each one). Avoid hand-curating
+unless you already know the misspellings — what each user needs depends
+on their accent, microphone, vocabulary, and project domain.
 
 The keys are matched case-insensitively with word boundaries; the values
 preserve the casing the user wrote. Default behavior when no file exists:

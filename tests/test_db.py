@@ -130,3 +130,14 @@ class TestRepoKnowledge:
         assert len(k1) == 1
         assert len(k2) == 1
         assert k1[0]["insight"] == "Insight A"
+
+
+def test_dwt_project_linkage(db):
+    task = db.create_task("dwt-linked", "time tracked work")
+    assert task.get("dwt_project_id") is None
+
+    db.set_dwt_project(task["id"], 12)
+    assert db.get_task_by_name("dwt-linked")["dwt_project_id"] == 12
+
+    db.set_dwt_project(task["id"], None)
+    assert db.get_task_by_name("dwt-linked")["dwt_project_id"] is None

@@ -190,6 +190,27 @@ def create_task(name: str, description: str = "", project: str = "") -> str:
 
 
 @mcp.tool()
+def link_dwt_project(task_name: str, dwt_project_id: int = 0, project: str = "") -> str:
+    """Link a contorch task to a Deep Work Timer project for time tracking.
+
+    A contorch task maps to a dwt PROJECT; granular dwt tasks live under it
+    and are ticked off as work items complete. Pass 0 to unlink.
+
+    Args:
+        task_name: Name of the contorch task
+        dwt_project_id: The dwt project id (from `dwt projects`); 0 unlinks
+        project: Git remote URL to find the task in the right project
+    """
+    task = db.get_task_by_name(task_name, project=project if project else None)
+    if not task:
+        return f"Error: No task named '{task_name}'."
+    db.set_dwt_project(task["id"], dwt_project_id or None)
+    if dwt_project_id:
+        return f"Linked task '{task_name}' to Deep Work Timer project {dwt_project_id}."
+    return f"Unlinked task '{task_name}' from Deep Work Timer."
+
+
+@mcp.tool()
 def list_tasks(project: str = "") -> str:
     """List all tasks, optionally filtered by project.
 
@@ -336,6 +357,17 @@ def get_task(task_name: str, project: str = "") -> str:
     ]
     if task["project"]:
         lines.append(f"Project: {task['project']}")
+    if task.get("dwt_project_id"):
+        lines.append(
+            f"Deep Work Timer project: {task['dwt_project_id']} — track time here: "
+            f"create granular dwt tasks for new work items (`dwt add \"...\" --project {task['dwt_project_id']}`), "
+            f"start/switch sessions on them, and tick them off (`dwt done`) when work items complete."
+        )
+    else:
+        lines.append(
+            "Deep Work Timer: not linked — if this work should be time-tracked, find or create "
+            "a dwt project (`dwt projects`, `dwt projects --add <name>`) and record it with link_dwt_project()."
+        )
     lines.append(f"Created: {task['created_at']}")
     lines.append("")
 
@@ -459,9 +491,11 @@ def search(
     product codenames) work as well as paraphrased questions.
 
     Args:
-        query: Natural language query (e.g., "what did we decide about Megatune",
-            "Gang Chu shadow queue context", "Lyft Teen brand awareness").
-            Proper nouns are matched lexically AND semantically.
+        query: Natural language query — a question, a topic, or a phrase
+            from a meeting. Proper nouns and acronyms are matched both
+            lexically (BM25) and semantically (vector), so misheard
+            spellings still surface if the user has installed corrections
+            for them via `context-orchestrator-corrections suggest`.
         project: Optional git remote URL to limit search to a project's tasks.
             Falls back to global search if no results.
         after_date: Optional ISO date/datetime — only return chunks captured at
