@@ -1,6 +1,6 @@
 """Polls ~/transcripts/ for new or modified .md files and reindexes them.
 
-Designed to pair with meeting-capture (https://github.com/stirredo/meeting-capture),
+Designed to pair with meeting-capture (https://github.com/contorch/meeting-capture),
 which writes transcripts continuously while a meeting runs. Files get appended to
 in flight, so the watcher must reindex when mtime advances — not just on first sight.
 """
@@ -39,8 +39,10 @@ DEFAULT_INTERVAL = 5.0
 # searchable. Acceptable for this workload.
 SETTLE_SECONDS = 60.0
 
-LAUNCHD_LABEL = "com.stirredo.transcript-watcher"
+LAUNCHD_LABEL = "com.contorch.transcript-watcher"
 LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+# Pre-rebrand label (com.stirredo.*): retired automatically by `install`.
+LEGACY_PLIST = Path.home() / "Library" / "LaunchAgents" / "com.stirredo.transcript-watcher.plist"
 
 log = logging.getLogger("context-orchestrator.watcher")
 
@@ -153,6 +155,11 @@ def cmd_once(args) -> int:
 def cmd_install(_args) -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LAUNCHD_PLIST.parent.mkdir(parents=True, exist_ok=True)
+    if LEGACY_PLIST.exists():
+        subprocess.run(["launchctl", "unload", "-w", str(LEGACY_PLIST)],
+                       check=False, stderr=subprocess.DEVNULL)
+        LEGACY_PLIST.unlink()
+        print(f"retired legacy agent {LEGACY_PLIST.name}")
     LAUNCHD_PLIST.write_bytes(_plist_payload(sys.executable))
     subprocess.run(["launchctl", "unload", str(LAUNCHD_PLIST)], check=False, stderr=subprocess.DEVNULL)
     subprocess.run(["launchctl", "load", "-w", str(LAUNCHD_PLIST)], check=False)

@@ -128,8 +128,8 @@ if [ "$INSTALL_LAUNCHD" -eq 1 ]; then
     echo "Setting up chroma HTTP server..."
 
     # Stop the watcher if it's running, so it releases any open handle while we cut over.
-    if [ -f "$HOME/Library/LaunchAgents/com.stirredo.transcript-watcher.plist" ]; then
-        launchctl unload "$HOME/Library/LaunchAgents/com.stirredo.transcript-watcher.plist" 2>/dev/null || true
+    if [ -f "$HOME/Library/LaunchAgents/com.contorch.transcript-watcher.plist" ]; then
+        launchctl unload "$HOME/Library/LaunchAgents/com.contorch.transcript-watcher.plist" 2>/dev/null || true
     fi
 
     # One-time backup of any existing chroma data before flipping to the daemon.

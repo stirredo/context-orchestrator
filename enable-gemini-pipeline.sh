@@ -36,9 +36,9 @@ CORRECTIONS_SRC_CANDIDATES=(
     "$HOME/eval-experiments/corrections-cache.json"
 )
 
-WATCHER_PLIST="$HOME/Library/LaunchAgents/com.stirredo.transcript-watcher.plist"
-MEETING_PLIST="$HOME/Library/LaunchAgents/com.stirredo.meeting-capture.plist"
-CHROMA_PLIST="$HOME/Library/LaunchAgents/com.stirredo.context-orchestrator-chroma.plist"
+WATCHER_PLIST="$HOME/Library/LaunchAgents/com.contorch.transcript-watcher.plist"
+MEETING_PLIST="$HOME/Library/LaunchAgents/com.contorch.meeting-capture.plist"
+CHROMA_PLIST="$HOME/Library/LaunchAgents/com.contorch.context-orchestrator-chroma.plist"
 
 CHROMA_DIR="$HOME/.context-orchestrator/chroma"
 WATCHER_STATE="$HOME/.context-orchestrator/watcher_state.json"

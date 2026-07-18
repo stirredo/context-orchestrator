@@ -8,7 +8,7 @@
 # partway through.
 #
 # Run on a fresh laptop:
-#   curl -fsSL https://raw.githubusercontent.com/stirredo/context-orchestrator/main/bootstrap.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/contorch/context-orchestrator/main/bootstrap.sh | bash
 #
 # Or from a local checkout:
 #   bash bootstrap.sh
@@ -20,9 +20,9 @@ set -uo pipefail
 BASE_DIR="${BASE_DIR:-$HOME/tasks}"
 GEMINI_KEY_FILE="$HOME/.config/google/key"
 
-CONTEXT_ORCH_REPO="https://github.com/stirredo/context-orchestrator.git"
-MEETING_CAPTURE_REPO="https://github.com/stirredo/meeting-capture.git"
-PIPELINE_MONITOR_REPO="https://github.com/stirredo/pipeline-monitor.git"
+CONTEXT_ORCH_REPO="https://github.com/contorch/context-orchestrator.git"
+MEETING_CAPTURE_REPO="https://github.com/contorch/meeting-capture.git"
+PIPELINE_MONITOR_REPO="https://github.com/contorch/pipeline-monitor.git"
 
 CONTEXT_ORCH_DIR="$BASE_DIR/context-orchestrator"
 MEETING_CAPTURE_DIR="$BASE_DIR/meeting-capture"
@@ -292,7 +292,7 @@ open_tcc_panes() {
     fi
     # After granting, bounce the daemons so they pick up the new permissions.
     info "Restarting daemons so they pick up the new grants…"
-    for label in com.stirredo.meeting-capture com.stirredo.transcript-watcher; do
+    for label in com.contorch.meeting-capture com.contorch.transcript-watcher; do
         launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null && ok "kicked $label" || true
     done
 }
@@ -322,7 +322,7 @@ ${BOLD}Verify everything works:${RESET}
   Should show ✓ in ~1.5s.
 
 ${BOLD}Useful one-liners:${RESET}
-  launchctl list | grep com.stirredo            ${DIM}# all daemons${RESET}
+  launchctl list | grep com.contorch            ${DIM}# all daemons${RESET}
   curl http://127.0.0.1:8765/api/v2/heartbeat   ${DIM}# chroma daemon${RESET}
   ~/.claude/hooks/auto-context.py < /dev/null   ${DIM}# probe the hook${RESET}
 

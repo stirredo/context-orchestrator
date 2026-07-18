@@ -8,7 +8,7 @@
 
 MCP server that gives Claude persistent memory of your tasks, sources, and repo knowledge across sessions, with a vector index over everything you've captured.
 
-Pairs with [meeting-capture](https://github.com/stirredo/meeting-capture) — that daemon writes meeting transcripts to `~/transcripts/`, and this project's `transcript-watcher` indexes them automatically. Either project runs without the other.
+Pairs with [meeting-capture](https://github.com/contorch/meeting-capture) — that daemon writes meeting transcripts to `~/transcripts/`, and this project's `transcript-watcher` indexes them automatically. Either project runs without the other.
 
 ## Requirements
 
@@ -20,10 +20,10 @@ Pairs with [meeting-capture](https://github.com/stirredo/meeting-capture) — th
 
 ### Recommended — full stack, one command
 
-Installs context-orchestrator + [meeting-capture](https://github.com/stirredo/meeting-capture) + [pipeline-monitor](https://github.com/stirredo/pipeline-monitor) + the auto-context Claude Code hook + (optional) Gemini activation:
+Installs context-orchestrator + [meeting-capture](https://github.com/contorch/meeting-capture) + [pipeline-monitor](https://github.com/contorch/pipeline-monitor) + the auto-context Claude Code hook + (optional) Gemini activation:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/stirredo/context-orchestrator/main/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/contorch/context-orchestrator/main/bootstrap.sh | bash
 ```
 
 The script is idempotent (safe to re-run), installs missing prereqs via Homebrew, prompts for a Gemini API key when it needs one (skip with empty input to stay all-local), and finishes with a clear punch-list of the few things macOS requires you to click yourself: restarting Claude Code so it re-reads `~/.claude/settings.json`, and granting Microphone + Screen Recording permissions in System Settings.
@@ -31,7 +31,7 @@ The script is idempotent (safe to re-run), installs missing prereqs via Homebrew
 ### Just this repo
 
 ```bash
-git clone https://github.com/stirredo/context-orchestrator.git
+git clone https://github.com/contorch/context-orchestrator.git
 cd context-orchestrator
 ./setup.sh
 ```

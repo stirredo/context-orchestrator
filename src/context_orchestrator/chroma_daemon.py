@@ -23,8 +23,10 @@ CHROMA_PATH = Path.home() / ".context-orchestrator" / "chroma"
 LOG_DIR = Path.home() / ".context-orchestrator"
 LOG_FILE = LOG_DIR / "chroma-daemon.log"
 
-LAUNCHD_LABEL = "com.stirredo.context-orchestrator-chroma"
+LAUNCHD_LABEL = "com.contorch.context-orchestrator-chroma"
 LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+# Pre-rebrand label (com.stirredo.*): retired automatically by `install`.
+LEGACY_PLIST = Path.home() / "Library" / "LaunchAgents" / "com.stirredo.context-orchestrator-chroma.plist"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -88,6 +90,11 @@ def cmd_install(args) -> int:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     CHROMA_PATH.mkdir(parents=True, exist_ok=True)
     LAUNCHD_PLIST.parent.mkdir(parents=True, exist_ok=True)
+    if LEGACY_PLIST.exists():
+        subprocess.run(["launchctl", "unload", "-w", str(LEGACY_PLIST)],
+                       check=False, stderr=subprocess.DEVNULL)
+        LEGACY_PLIST.unlink()
+        print(f"retired legacy agent {LEGACY_PLIST.name}")
     LAUNCHD_PLIST.write_bytes(
         _plist_payload(sys.executable, args.host, args.port, CHROMA_PATH)
     )
